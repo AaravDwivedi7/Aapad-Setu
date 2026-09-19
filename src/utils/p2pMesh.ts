@@ -1,28 +1,37 @@
 /**
  * Aapad Setu — Real Offline Peer-to-Peer Mesh & Acoustic Modem Network Engine
- * Integrates WebRTC P2P DataChannels, Cross-Device BroadcastChannels, and
+ * Integrates WebRTC P2P DataChannels, Cross-Device BroadcastChannels, PeerJS Mesh Clustering, and
  * Acoustic Audio Modem (Sound-based FSK data transmission) for zero-infrastructure survival.
  */
 
 export interface DisasterPacket {
+  id?: string;
   uuid: string;
   origin_node: string;
   timestamp: string;
-  hop_count: number;
-  max_hops: number;
+  hop_count?: number;
+  hops?: number;
+  max_hops?: number;
+  ttl?: number;
   lat: number;
+  lon?: number;
   lng: number;
   accuracy: number;
   altitude?: number;
-  battery_level: number;
+  battery_level?: number;
+  battery?: string | number;
   status: string;
-  triage_level: 'RED' | 'YELLOW' | 'GREEN';
+  targetRole?: string;
+  voiceNote?: string;
+  triage_level?: 'RED' | 'YELLOW' | 'GREEN';
   victim_name?: string;
   blood_group?: string;
   medical_notes?: string;
+  medical?: string;
   emergency_contacts?: string;
   rssi?: number;
   checksum?: string;
+  [key: string]: any;
 }
 
 // CRC-16-CCITT for packet integrity verification
@@ -40,6 +49,177 @@ export function calculateCRC16(dataStr: string): string {
     }
   }
   return crc.toString(16).toUpperCase().padStart(4, '0');
+}
+
+/**
+ * PeerJS WebRTC Dynamic Mesh Manager for Room "AAPAD_SETU_MESH_ZONE_1"
+ */
+export class PeerJSMeshManager {
+  public peer: any = null;
+  public peerId: string = '';
+  public roomName: string = 'AAPAD_SETU_MESH_ZONE_1';
+  public connections: Map<string, any> = new Map();
+  public isConnected: boolean = false;
+  private onPacketReceived: ((packet: DisasterPacket, senderId: string) => void) | null = null;
+  private onPeersChange: ((peers: string[]) => void) | null = null;
+  private onLog: ((tag: string, msg: string) => void) | null = null;
+  private heartbeatTimer: any = null;
+
+  constructor(
+    room: string = 'AAPAD_SETU_MESH_ZONE_1',
+    onPacket?: (packet: DisasterPacket, senderId: string) => void,
+    onPeers?: (peers: string[]) => void,
+    onLog?: (tag: string, msg: string) => void
+  ) {
+    this.roomName = room;
+    if (onPacket) this.onPacketReceived = onPacket;
+    if (onPeers) this.onPeersChange = onPeers;
+    if (onLog) this.onLog = onLog;
+  }
+
+  private log(tag: string, msg: string) {
+    if (this.onLog) this.onLog(tag, msg);
+  }
+
+  public init(customNodeId?: string) {
+    try {
+      const PeerClass = (window as any).Peer || (typeof window !== 'undefined' ? (window as any).peerjs?.Peer : null);
+      
+      const cleanNodeId = (customNodeId || 'node-' + Math.random().toString(36).substring(2, 7)).toLowerCase().replace(/[^a-z0-9]/g, '');
+      const assignedId = `aapad-zone1-${cleanNodeId}`;
+
+      if (!PeerClass) {
+        this.log('P2P', 'ℹ️ PeerJS library loading from CDN...');
+        return;
+      }
+
+      this.peer = new PeerClass(assignedId, {
+        debug: 1,
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+          ]
+        }
+      });
+
+      this.peer.on('open', (id: string) => {
+        this.peerId = id;
+        this.isConnected = true;
+        this.log('P2P', `🌐 WebRTC PeerJS Mesh Node initialized. ID: [${id}] in Room: ${this.roomName}`);
+        this.notifyPeers();
+      });
+
+      this.peer.on('connection', (conn: any) => {
+        this.setupConnection(conn);
+      });
+
+      this.peer.on('error', (err: any) => {
+        // If ID is already taken, try with random suffix
+        if (err.type === 'unavailable-id') {
+          const fallbackId = `aapad-zone1-${cleanNodeId}-${Math.floor(Math.random() * 1000)}`;
+          try {
+            this.peer = new PeerClass(fallbackId);
+            this.peer.on('open', (id: string) => {
+              this.peerId = id;
+              this.isConnected = true;
+              this.log('P2P', `🌐 WebRTC PeerJS Mesh Node re-registered with ID: [${id}]`);
+              this.notifyPeers();
+            });
+            this.peer.on('connection', (c: any) => this.setupConnection(c));
+          } catch (e) {}
+        } else {
+          console.warn('PeerJS connection notice:', err);
+        }
+      });
+
+    } catch (e) {
+      console.warn('PeerJS init fallback:', e);
+    }
+  }
+
+  public connectToPeer(targetPeerId: string) {
+    if (!this.peer || !targetPeerId || targetPeerId === this.peerId) return;
+    if (this.connections.has(targetPeerId)) return;
+
+    try {
+      const conn = this.peer.connect(targetPeerId, { reliable: true });
+      this.setupConnection(conn);
+    } catch (e) {
+      console.warn('P2P Connect error:', e);
+    }
+  }
+
+  private setupConnection(conn: any) {
+    conn.on('open', () => {
+      this.connections.set(conn.peer, conn);
+      this.log('P2P', `🔗 WebRTC DataChannel link open with Peer [${conn.peer}].`);
+      this.notifyPeers();
+    });
+
+    conn.on('data', (data: any) => {
+      try {
+        const packet = typeof data === 'string' ? JSON.parse(data) : data;
+        if (this.onPacketReceived) {
+          this.onPacketReceived(packet, conn.peer);
+        }
+      } catch (e) {
+        console.warn('P2P parse error:', e);
+      }
+    });
+
+    conn.on('close', () => {
+      this.connections.delete(conn.peer);
+      this.log('P2P', `⚠️ P2P DataChannel closed with Peer [${conn.peer}].`);
+      this.notifyPeers();
+    });
+
+    conn.on('error', () => {
+      this.connections.delete(conn.peer);
+      this.notifyPeers();
+    });
+  }
+
+  public broadcast(packet: DisasterPacket): number {
+    let sentCount = 0;
+    const serialized = JSON.stringify(packet);
+
+    for (const [peerId, conn] of this.connections.entries()) {
+      if (conn && conn.open) {
+        try {
+          conn.send(serialized);
+          sentCount++;
+        } catch (e) {
+          console.warn('P2P send failed to peer', peerId, e);
+        }
+      }
+    }
+    return sentCount;
+  }
+
+  private notifyPeers() {
+    const list = Array.from(this.connections.keys());
+    if (this.onPeersChange) {
+      this.onPeersChange(list);
+    }
+  }
+
+  public getConnectedCount(): number {
+    return this.connections.size;
+  }
+
+  public destroy() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    for (const conn of this.connections.values()) {
+      try { conn.close(); } catch (e) {}
+    }
+    this.connections.clear();
+    if (this.peer) {
+      try { this.peer.destroy(); } catch (e) {}
+      this.peer = null;
+    }
+    this.isConnected = false;
+  }
 }
 
 /**
@@ -94,7 +274,6 @@ export class WebRTCPeerMesh {
     await pc.setLocalDescription(offer);
 
     return new Promise((resolve) => {
-      // Collect local ICE candidates into standalone session payload
       pc.onicecandidate = (event) => {
         if (!event.candidate) {
           const sessionPayload = JSON.stringify(pc.localDescription);
@@ -103,7 +282,6 @@ export class WebRTCPeerMesh {
         }
       };
 
-      // Fallback timeout in case ice gathering completes immediately
       setTimeout(() => {
         if (pc.localDescription) {
           resolve(btoa(JSON.stringify(pc.localDescription)));
@@ -307,3 +485,4 @@ export class AcousticSoundModem {
     }
   }
 }
+

@@ -7,7 +7,7 @@ import { P2PPairingModal } from './components/P2PPairingModal';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { BluetoothMeshManager } from './utils/bluetooth';
 import { SonarAudioEngine } from './utils/sonarAudio';
-import { WebRTCPeerMesh, AcousticSoundModem } from './utils/p2pMesh';
+import { WebRTCPeerMesh, AcousticSoundModem, PeerJSMeshManager } from './utils/p2pMesh';
 import {
   Radio,
   Wifi,
@@ -295,6 +295,9 @@ export default function App() {
   const sonarEngineRef = useRef(null);
   const bleManagerRef = useRef(null);
   const p2pMeshRef = useRef(null);
+  const peerJSMeshRef = useRef(null);
+  const [peerMeshCount, setPeerMeshCount] = useState(0);
+  const [peerMeshId, setPeerMeshId] = useState('');
   const acousticModemRef = useRef(null);
 
   // Proximity Radar Beep & Audio State
@@ -898,7 +901,112 @@ export default function App() {
     }
   }, [addLog]);
 
-  // INITIALIZE REAL-WORLD HARDWARE ENGINES (Web Bluetooth, Web Audio Sonar, WebRTC P2P DataChannel, Acoustic Modem)
+  // ROLE-BASED MESH PACKET INGESTION & DISPATCH ROUTER
+  const handleIncomingMeshPacket = useCallback((packet, sourceChannel = 'MESH', senderDeviceId = null) => {
+    if (!packet || !packet.uuid) return;
+    
+    // Ignore self-echoes
+    if (senderDeviceId && senderDeviceId === deviceInstanceId) return;
+    if (packet.origin_node && (packet.origin_node === nodes.nodeA.shortId || packet.origin_node === userProfile.name)) return;
+
+    // Normalize coordinates
+    const lat = Number(packet.lat) || 19.0760;
+    const lng = Number(packet.lon !== undefined ? packet.lon : packet.lng) || 72.8777;
+    const peerIdStr = senderDeviceId || packet.origin_id || packet.origin_node || packet.uuid;
+
+    // Track peer device location in state
+    setDetectedPeers(prev => ({
+      ...prev,
+      [peerIdStr]: {
+        id: peerIdStr,
+        lat,
+        lng,
+        status: packet.status || 'CRITICAL',
+        rssi: packet.rssi || -62,
+        lastSeen: Date.now()
+      }
+    }));
+
+    // Ingest into extra victim packets so Incident Command and Triage Roster have complete real-time record
+    setExtraVictimPackets(prev => {
+      const exists = prev.some(p => p.uuid === packet.uuid || p.id === packet.id || (p.origin_id && p.origin_id === peerIdStr));
+      if (exists) {
+        return prev.map(p => {
+          if (p.uuid === packet.uuid || p.id === packet.id || (p.origin_id && p.origin_id === peerIdStr)) {
+            return { ...p, ...packet, lat, lng, lon: lng };
+          }
+          return p;
+        });
+      }
+      return [{ ...packet, lat, lng, lon: lng }, ...prev];
+    });
+
+    // Buffer in local node stores (Node B Relay + Node C Gateway)
+    setNodes(prev => {
+      const alreadyInB = prev.nodeB.packets.some(p => p.uuid === packet.uuid);
+      if (alreadyInB) return prev;
+      const hopped = {
+        ...packet,
+        lat,
+        lng,
+        lon: lng,
+        hops: (packet.hops || 0) + 1,
+        ttl: Math.max(0, (packet.ttl || 5) - 1),
+        receivedVia: sourceChannel,
+        receivedFrom: peerIdStr
+      };
+      return {
+        ...prev,
+        nodeB: { ...prev.nodeB, packets: [hopped, ...prev.nodeB.packets] },
+        nodeC: { ...prev.nodeC, packets: [hopped, ...prev.nodeC.packets] }
+      };
+    });
+
+    setMetrics(prev => ({
+      ...prev,
+      broadcastsReceived: prev.broadcastsReceived + 1,
+      packetsRelayed: prev.packetsRelayed + 1
+    }));
+
+    // 1. IF ROLE_VICTIM (Tab: "I Need Help"):
+    // Silently buffer and re-broadcast to adjacent peers. DO NOT trigger audio alerts, sonar beeps, or overlay popups.
+    if (activeTab === 'victim') {
+      addLog('MESH_RELAY', `[SILENT RELAY] Victim Node buffered & forwarded packet [${packet.uuid}] from ${peerIdStr}. No alarm or popup triggered.`);
+      // Relay hop over broadcast channel if TTL > 1
+      if ((packet.ttl || 5) > 1 && broadcastChannelRef.current) {
+        try {
+          broadcastChannelRef.current.postMessage({
+            action: 'RELAY_HOP',
+            senderNode: 'SILENT_RELAY_NODE',
+            senderDeviceId: deviceInstanceId,
+            packet: {
+              ...packet,
+              hops: (packet.hops || 0) + 1,
+              ttl: Math.max(0, (packet.ttl || 5) - 1)
+            }
+          });
+        } catch (e) {}
+      }
+      return;
+    }
+
+    // 2. IF ROLE_RESPONDER (Tab: "Rescuer Dashboard"):
+    // Trigger Tactical Dispatch Alert: Audio beep, tactical alert toast, update incident roster!
+    addLog('DISPATCH', `🚨 [RESCUER ALERT] Emergency Distress Packet [${packet.uuid}] received via ${sourceChannel} from ${peerIdStr}! Status: ${packet.status || 'CRITICAL'}`);
+    showToast(
+      '🚨 CASUALTY DISTRESS ALERT',
+      `Victim [${packet.origin_node || packet.origin_id || peerIdStr}] reported ${packet.status || 'CRITICAL'}! Radar updated.`,
+      'alert'
+    );
+
+    // Audio cue for rescuer
+    playRadarBeep(920, 0.08);
+    if (sonarEngineRef.current) {
+      sonarEngineRef.current.unlockAudioContext();
+    }
+  }, [activeTab, deviceInstanceId, userProfile.name, nodes.nodeA.shortId, addLog, showToast, playRadarBeep]);
+
+  // INITIALIZE REAL-WORLD HARDWARE ENGINES (Web Bluetooth, Web Audio Sonar, WebRTC P2P DataChannel, PeerJS Mesh, Acoustic Modem)
   useEffect(() => {
     sonarEngineRef.current = new SonarAudioEngine((pulse) => {
       // Optional pulse callback
@@ -917,28 +1025,40 @@ export default function App() {
 
     p2pMeshRef.current = new WebRTCPeerMesh(
       (packet) => {
-        addLog('P2P', `📦 Direct P2P Disaster Packet [${packet.uuid}] received from physical phone via WebRTC DataChannel!`);
-        showToast('🚨 Real P2P Packet Received!', `Direct telemetry from peer: ${packet.uuid}`, 'alert');
-        setNodes(prev => {
-          const exists = prev.nodeB.packets.some(p => p.uuid === packet.uuid);
-          if (exists) return prev;
-          return {
-            ...prev,
-            nodeB: { ...prev.nodeB, packets: [packet, ...prev.nodeB.packets] }
-          };
-        });
-        setMetrics(m => ({ ...m, packetsRelayed: m.packetsRelayed + 1, hopsCompleted: m.hopsCompleted + 1 }));
+        handleIncomingMeshPacket(packet, 'WebRTC-P2P');
       },
       (state) => setP2pConnectionState(state),
       (tag, msg) => addLog(tag, msg)
     );
 
+    // Initialize PeerJS Multi-Device WebRTC Clustering Mesh
+    try {
+      peerJSMeshRef.current = new PeerJSMeshManager({
+        onPacket: (packet) => {
+          handleIncomingMeshPacket(packet, 'WebRTC-PeerJS');
+        },
+        onPeerCount: (count) => {
+          setPeerMeshCount(count);
+        },
+        onPeerId: (id) => {
+          setPeerMeshId(id);
+        },
+        onLog: (tag, msg) => {
+          addLog(tag, msg);
+        }
+      });
+      peerJSMeshRef.current.init();
+    } catch (e) {
+      console.warn('PeerJS init failed:', e);
+    }
+
     return () => {
       if (sonarEngineRef.current) sonarEngineRef.current.stop();
       if (bleManagerRef.current) bleManagerRef.current.disconnect();
       if (p2pMeshRef.current) p2pMeshRef.current.close();
+      if (peerJSMeshRef.current) peerJSMeshRef.current.destroy();
     };
-  }, [addLog, showToast]);
+  }, [addLog, showToast, handleIncomingMeshPacket]);
 
   // 3. MULTI-DEVICE REAL-TIME SIGNAL HOPPING (BroadcastChannel + Real-Time Server SSE Mesh)
   useEffect(() => {
@@ -962,91 +1082,7 @@ export default function App() {
         if (!data.packet) return;
 
         const { action, packet, senderNode, senderDeviceId } = data;
-        
-        // Check if message is from an external physical phone or separate tab
-        const isExternalPeer = senderDeviceId && senderDeviceId !== deviceInstanceId;
-        const peerIdStr = senderDeviceId || packet.origin_node || senderNode || packet.uuid;
-
-        // Register peer coordinates and RSSI for real-time proximity tracking
-        if (packet && packet.lat && packet.lng) {
-          setDetectedPeers(prev => ({
-            ...prev,
-            [peerIdStr]: {
-              id: peerIdStr,
-              lat: Number(packet.lat),
-              lng: Number(packet.lng),
-              rssi: packet.rssi || -68,
-              status: packet.status || 'ACTIVE',
-              lastSeen: Date.now()
-            }
-          }));
-        }
-
-        if (isExternalPeer) {
-          showToast(
-            '📡 External Physical Peer Connected!',
-            `Device ID [${peerIdStr}] detected in range!`,
-            'alert'
-          );
-          addLog('MESH', `📡 External Physical Peer Connected: Device ID [${peerIdStr}] detected in range.`);
-        } else {
-          addLog('MESH', `📡 Inter-Device Signal Received [${action}] from Peer: ${packet.uuid} (Hops: ${packet.hops}, TTL: ${packet.ttl})`);
-        }
-
-        setMetrics(prev => ({ ...prev, broadcastsReceived: prev.broadcastsReceived + 1 }));
-
-        // Handle incoming packet
-        if (action === 'SOS_BROADCAST' || action === 'RELAY_HOP') {
-          if (!isExternalPeer) {
-            showToast(
-              '🚨 Signal Detected from Nearby Peer!',
-              `Packet [${packet.uuid}] received via local mesh channel. Hops: ${packet.hops} | Status: ${packet.status}`,
-              'alert'
-            );
-          }
-
-          // Ingest into extra victim packets so Rescuer & Incident Command see it immediately
-          setExtraVictimPackets(prev => {
-            if (prev.some(p => p.uuid === packet.uuid)) return prev;
-            return [packet, ...prev];
-          });
-
-          // Deliver into Node B (Relay Buffer) if not already present
-          setNodes(prev => {
-            const alreadyExists = prev.nodeB.packets.some(p => p.uuid === packet.uuid);
-            if (alreadyExists) {
-              addLog('DEDUP', `Duplicate rejected on Relay: Packet [${packet.uuid}] already stored.`);
-              setMetrics(m => ({ ...m, duplicatesRejected: m.duplicatesRejected + 1 }));
-              return prev;
-            }
-
-            const updatedPacket = {
-              ...packet,
-              hops: packet.hops + 1,
-              ttl: Math.max(0, packet.ttl - 1),
-              receivedViaChannel: true,
-              receivedFromDevice: peerIdStr
-            };
-
-            return {
-              ...prev,
-              nodeB: {
-                ...prev.nodeB,
-                packets: [updatedPacket, ...prev.nodeB.packets]
-              },
-              nodeC: {
-                ...prev.nodeC,
-                packets: [updatedPacket, ...prev.nodeC.packets]
-              }
-            };
-          });
-        } else if (action === 'GATEWAY_SYNC') {
-          showToast(
-            '☁️ Incident Uplinked to Cloud Gateway!',
-            `Packet [${packet.uuid}] has reached an active cellular/satellite gateway.`,
-            'success'
-          );
-        }
+        handleIncomingMeshPacket(packet, 'BroadcastChannel', senderDeviceId);
       };
     } catch (e) {
       console.warn('BroadcastChannel not supported in this environment', e);
@@ -1061,21 +1097,7 @@ export default function App() {
         try {
           const data = JSON.parse(e.data);
           if (data.packets && data.packets.length > 0) {
-            setExtraVictimPackets(prev => {
-              const existingUuids = new Set(prev.map(p => p.uuid));
-              const newPackets = data.packets.filter(p => !existingUuids.has(p.uuid));
-              return [...newPackets, ...prev];
-            });
-            setNodes(prev => {
-              const bUuids = new Set(prev.nodeB.packets.map(p => p.uuid));
-              const toAdd = data.packets.filter(p => !bUuids.has(p.uuid));
-              if (toAdd.length === 0) return prev;
-              return {
-                ...prev,
-                nodeB: { ...prev.nodeB, packets: [...toAdd, ...prev.nodeB.packets] },
-                nodeC: { ...prev.nodeC, packets: [...toAdd, ...prev.nodeC.packets] }
-              };
-            });
+            data.packets.forEach(p => handleIncomingMeshPacket(p, 'Server-InitSync'));
           }
           if (data.peers && data.peers.length > 0) {
             const peersMap = {};
@@ -1096,53 +1118,7 @@ export default function App() {
           const data = JSON.parse(e.data);
           const { packet, senderDeviceId } = data;
           if (!packet || senderDeviceId === deviceInstanceId) return;
-
-          // Ingest into extra victim packets & node buffers
-          setExtraVictimPackets(prev => {
-            if (prev.some(p => p.uuid === packet.uuid)) return prev;
-            return [packet, ...prev];
-          });
-
-          setNodes(prev => {
-            const alreadyInB = prev.nodeB.packets.some(p => p.uuid === packet.uuid);
-            if (alreadyInB) return prev;
-            return {
-              ...prev,
-              nodeB: {
-                ...prev.nodeB,
-                packets: [packet, ...prev.nodeB.packets]
-              },
-              nodeC: {
-                ...prev.nodeC,
-                packets: [packet, ...prev.nodeC.packets]
-              }
-            };
-          });
-
-          if (packet.lat && packet.lng) {
-            setDetectedPeers(prev => ({
-              ...prev,
-              [senderDeviceId || packet.uuid]: {
-                id: senderDeviceId || packet.uuid,
-                lat: Number(packet.lat),
-                lng: Number(packet.lng),
-                status: packet.status || 'CRITICAL - TRAPPED',
-                rssi: -58,
-                lastSeen: Date.now()
-              }
-            }));
-          }
-
-          showToast(
-            '🚨 REAL-TIME SOS RECEIVED!',
-            `Victim [${packet.origin_node || packet.uuid}] reported trapped! Coordinates synced in Incident Command.`,
-            'alert'
-          );
-          addLog('MESH', `🚨 Real-Time Emergency SOS Received from Phone [${senderDeviceId || packet.origin_node}]: Status: ${packet.status} | Location: (${Number(packet.lat).toFixed(4)}, ${Number(packet.lng).toFixed(4)})`);
-          
-          if (sonarEngineRef.current) {
-            sonarEngineRef.current.unlockAudioContext();
-          }
+          handleIncomingMeshPacket(packet, 'Server-SSE', senderDeviceId);
         } catch (err) {
           console.error('SSE SOS_ALERT error:', err);
         }
@@ -1162,26 +1138,26 @@ export default function App() {
           }));
 
           if (peer.isSosActive) {
-            setExtraVictimPackets(prev => {
-              if (prev.some(p => p.origin_id === peer.id || p.uuid === `sos-${peer.id}`)) return prev;
-              return [{
-                uuid: `sos-${peer.id}`,
-                origin_id: peer.id,
-                origin_node: peer.name || `Citizen [${peer.shortId}]`,
-                status: peer.status || 'TRAPPED',
-                priority: 'CRITICAL',
-                medical: peer.medicalInfo || 'Emergency distress signal active',
-                lat: peer.lat,
-                lng: peer.lng,
-                accuracy: peer.accuracy || 4.0,
-                battery: `${peer.battery}%`,
-                altitude: `${peer.altitude}m`,
-                rssi: -65,
-                ttl: 8,
-                hops: 1,
-                timestamp: new Date().toISOString()
-              }, ...prev];
-            });
+            const peerPkt = {
+              uuid: `sos-${peer.id}`,
+              id: `sos-${peer.id}`,
+              origin_id: peer.id,
+              origin_node: peer.name || `Citizen [${peer.shortId}]`,
+              status: peer.status || 'TRAPPED',
+              priority: 'CRITICAL',
+              medical: peer.medicalInfo || 'Emergency distress signal active',
+              lat: peer.lat,
+              lng: peer.lng,
+              lon: peer.lng,
+              accuracy: peer.accuracy || 4.0,
+              battery: `${peer.battery}%`,
+              altitude: `${peer.altitude}m`,
+              rssi: -65,
+              ttl: 8,
+              hops: 1,
+              timestamp: new Date().toISOString()
+            };
+            handleIncomingMeshPacket(peerPkt, 'Server-Heartbeat', peer.id);
           }
         } catch (err) {}
       });
@@ -1203,7 +1179,7 @@ export default function App() {
         try {
           const { uuid, deviceId, status } = JSON.parse(e.data);
           const updatePkt = p => {
-            if (p.uuid === uuid || p.origin_id === deviceId || p.origin_node === deviceId) {
+            if (p.uuid === uuid || p.id === uuid || p.origin_id === deviceId || p.origin_node === deviceId) {
               return { ...p, status, priority: status === 'SAFE' ? 'LOW' : p.priority };
             }
             return p;
@@ -1224,7 +1200,7 @@ export default function App() {
       if (channel) channel.close();
       if (eventSource) eventSource.close();
     };
-  }, [addLog, showToast, deviceInstanceId]);
+  }, [addLog, showToast, deviceInstanceId, handleIncomingMeshPacket]);
 
   // 3.1 AUTOMATIC CONTINUOUS DISASTER BEACON & SERVER HEARTBEAT
   useEffect(() => {
@@ -2002,21 +1978,26 @@ export default function App() {
     const accuracy = gpsState.status === 'LOCKED' ? gpsState.accuracy : 5.0;
     const batteryPct = nodes.nodeA.battery;
 
-    const effectiveVoiceTelemetry = customVoiceNote || (voiceTranscript ? `Transcribed Voice Note: "${voiceTranscript}"` : null);
+    const effectiveVoiceTelemetry = customVoiceNote || (voiceTranscript ? `Transcribed Voice Note: "${voiceTranscript}"` : '');
+    const packetId = generatePacketId();
 
     const newPacket = {
-      uuid: generatePacketId(),
+      id: packetId,
+      uuid: packetId,
       timestamp: new Date().toISOString(),
       lat: lat,
+      lon: lng,
       lng: lng,
       accuracy: accuracy,
-      battery: batteryPct,
+      battery: `${batteryPct}%`,
       hops: 0,
       ttl: 5,
-      status: nodes.nodeA.status,
-      altitude: gpsState.altitude,
-      medical: userProfile.includeMedical ? `${userProfile.bloodGroup} (${userProfile.medicalNotes})` : 'REDACTED',
+      targetRole: 'RESPONDER_ONLY',
+      status: 'CRITICAL',
+      altitude: gpsState.altitude || 18.0,
+      medical: userProfile.includeMedical ? `${userProfile.bloodGroup} (${userProfile.medicalNotes})` : 'Emergency distress signal active',
       origin_node: userProfile.anonymizeNode ? nodes.nodeA.shortId : userProfile.name,
+      origin_id: deviceInstanceId,
       voiceNote: effectiveVoiceTelemetry
     };
 
@@ -2035,9 +2016,14 @@ export default function App() {
     // Automatically trigger audible rescue alarm siren immediately
     startSirenTone();
 
-    addLog('SOS', `🚨 CRITICAL SOS TRIGGERED! Packet [${newPacket.uuid}] generated at Lat: ${lat.toFixed(6)}, Lng: ${lng.toFixed(6)} (±${accuracy}m)${effectiveVoiceTelemetry ? ` • [Telemetry: ${effectiveVoiceTelemetry}]` : ''}.`);
+    addLog('SOS', `🚨 CRITICAL SOS TRIGGERED! Packet [${newPacket.uuid}] generated at Lat: ${lat.toFixed(6)}, Lon: ${lng.toFixed(6)} (±${accuracy}m)${effectiveVoiceTelemetry ? ` • [Telemetry: ${effectiveVoiceTelemetry}]` : ''}.`);
 
-    // 1. Broadcast across local BroadcastChannel
+    // 1. Broadcast across PeerJS WebRTC direct mesh
+    if (peerJSMeshRef.current) {
+      peerJSMeshRef.current.broadcast(newPacket);
+    }
+
+    // 2. Broadcast across local BroadcastChannel
     if (broadcastChannelRef.current) {
       try {
         broadcastChannelRef.current.postMessage({
@@ -2052,7 +2038,7 @@ export default function App() {
       }
     }
 
-    // 2. Transmit to Disaster Mesh Server over HTTP for real-time inter-device sync
+    // 3. Transmit to Disaster Mesh Server over HTTP for real-time inter-device sync
     fetch('/api/mesh/sos', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2066,12 +2052,11 @@ export default function App() {
       console.warn('Network SOS push error (local radio mesh active):', err);
     });
 
-    showToast('🚨 SOS Transmitted!', `High-accuracy packet broadcasted locally. Lat: ${lat.toFixed(4)}, Lng: ${lng.toFixed(4)}`, 'alert');
+    showToast('🚨 SOS Transmitted!', `High-accuracy packet broadcasted to Rescuers. Lat: ${lat.toFixed(4)}, Lon: ${lng.toFixed(4)}`, 'alert');
   }, [
     manualCoords,
     gpsState,
     nodes.nodeA.battery,
-    nodes.nodeA.status,
     nodes.nodeA.shortId,
     userProfile,
     voiceTranscript,

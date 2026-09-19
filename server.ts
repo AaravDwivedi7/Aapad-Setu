@@ -20,24 +20,24 @@ interface MeshPeer {
 }
 
 interface SosPacket {
+  id?: string;
   uuid: string;
   origin_node: string;
   deviceId: string;
   lat: number;
   lng: number;
+  lon?: number;
   accuracy: number;
   altitude: number;
-  battery: number;
+  battery: string | number;
   status: string;
-  medical?: {
-    bloodGroup?: string;
-    allergies?: string;
-    emergencyContact?: string;
-  };
+  targetRole?: string;
+  voiceNote?: string;
+  medical?: any;
   hops: number;
   ttl: number;
   timestamp: string;
-  payload: {
+  payload?: {
     msg: string;
     level: string;
   };
@@ -154,21 +154,29 @@ async function startServer() {
   // 5. Emergency SOS Broadcast (Instant broadcast across all connected phones)
   app.post('/api/mesh/sos', (req, res) => {
     const { packet, deviceId } = req.body;
-    if (!packet || !packet.uuid) {
+    if (!packet || (!packet.uuid && !packet.id)) {
       return res.status(400).json({ error: 'Invalid packet payload' });
     }
 
+    const packetId = packet.uuid || packet.id || ('aapad-' + Math.random().toString(36).substring(2, 9));
+    const latitude = Number(packet.lat) || 19.0760;
+    const longitude = Number(packet.lon ?? packet.lng) || 72.8777;
+
     const sosPacket: SosPacket = {
-      uuid: packet.uuid,
-      origin_node: packet.origin_node || 'VICTIM-1',
-      deviceId: deviceId || packet.origin_node,
-      lat: Number(packet.lat) || 19.0760,
-      lng: Number(packet.lng) || 72.8777,
+      uuid: packetId,
+      id: packetId,
+      origin_node: packet.origin_node || (deviceId ? `Node-${deviceId}` : 'Citizen Device'),
+      deviceId: deviceId || packet.origin_node || 'UNKNOWN-DEV',
+      lat: latitude,
+      lng: longitude,
+      lon: longitude,
       accuracy: Number(packet.accuracy) || 5,
       altitude: Number(packet.altitude) || 15,
-      battery: Number(packet.battery) || 85,
-      status: packet.status || 'CRITICAL - TRAPPED',
-      medical: packet.medical || {},
+      battery: packet.battery ?? 85,
+      status: packet.status || 'CRITICAL',
+      targetRole: packet.targetRole || 'RESPONDER_ONLY',
+      voiceNote: packet.voiceNote || '',
+      medical: packet.medical || '',
       hops: Number(packet.hops) || 0,
       ttl: Number(packet.ttl) || 5,
       timestamp: packet.timestamp || new Date().toISOString(),
