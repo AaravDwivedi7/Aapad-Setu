@@ -609,6 +609,18 @@ export default function App() {
       nodeC: { ...prev.nodeC, packets: prev.nodeC.packets.map(updatePacket) }
     }));
     setExtraVictimPackets(prev => prev.map(updatePacket));
+    
+    // Broadcast status to server for multi-device sync
+    fetch('/api/mesh/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        uuid: victimId,
+        deviceId: victimId,
+        status: 'SAFE'
+      })
+    }).catch(() => {});
+
     addLog('RELAY', `Incident Command updated victim [${victimId}] status to SAFE.`);
     showToast('✅ Victim Triage Updated', `Victim [${victimId}] marked as SAFE & accounted for.`, 'success');
   }, [addLog, showToast]);
@@ -928,7 +940,7 @@ export default function App() {
     };
   }, [addLog, showToast]);
 
-  // 3. MULTI-DEVICE REAL-TIME SIGNAL HOPPING (BroadcastChannel "resq_mesh_network")
+  // 3. MULTI-DEVICE REAL-TIME SIGNAL HOPPING (BroadcastChannel + Real-Time Server SSE Mesh)
   useEffect(() => {
     let channel;
     try {
@@ -976,7 +988,7 @@ export default function App() {
             `Device ID [${peerIdStr}] detected in range!`,
             'alert'
           );
-          addLog('MESH', `📡 External Physical Peer Connected: Device ID [${peerIdStr}] detected in range over BroadcastChannel.`);
+          addLog('MESH', `📡 External Physical Peer Connected: Device ID [${peerIdStr}] detected in range.`);
         } else {
           addLog('MESH', `📡 Inter-Device Signal Received [${action}] from Peer: ${packet.uuid} (Hops: ${packet.hops}, TTL: ${packet.ttl})`);
         }
@@ -992,6 +1004,12 @@ export default function App() {
               'alert'
             );
           }
+
+          // Ingest into extra victim packets so Rescuer & Incident Command see it immediately
+          setExtraVictimPackets(prev => {
+            if (prev.some(p => p.uuid === packet.uuid)) return prev;
+            return [packet, ...prev];
+          });
 
           // Deliver into Node B (Relay Buffer) if not already present
           setNodes(prev => {
@@ -1015,6 +1033,10 @@ export default function App() {
               nodeB: {
                 ...prev.nodeB,
                 packets: [updatedPacket, ...prev.nodeB.packets]
+              },
+              nodeC: {
+                ...prev.nodeC,
+                packets: [updatedPacket, ...prev.nodeC.packets]
               }
             };
           });
@@ -1030,19 +1052,206 @@ export default function App() {
       console.warn('BroadcastChannel not supported in this environment', e);
     }
 
+    // Connect to Server-Sent Events (SSE) stream for real-time inter-device network sync
+    let eventSource = null;
+    try {
+      eventSource = new EventSource('/api/mesh/stream');
+
+      eventSource.addEventListener('INIT_SYNC', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.packets && data.packets.length > 0) {
+            setExtraVictimPackets(prev => {
+              const existingUuids = new Set(prev.map(p => p.uuid));
+              const newPackets = data.packets.filter(p => !existingUuids.has(p.uuid));
+              return [...newPackets, ...prev];
+            });
+            setNodes(prev => {
+              const bUuids = new Set(prev.nodeB.packets.map(p => p.uuid));
+              const toAdd = data.packets.filter(p => !bUuids.has(p.uuid));
+              if (toAdd.length === 0) return prev;
+              return {
+                ...prev,
+                nodeB: { ...prev.nodeB, packets: [...toAdd, ...prev.nodeB.packets] },
+                nodeC: { ...prev.nodeC, packets: [...toAdd, ...prev.nodeC.packets] }
+              };
+            });
+          }
+          if (data.peers && data.peers.length > 0) {
+            const peersMap = {};
+            data.peers.forEach(peer => {
+              if (peer.id !== deviceInstanceId) {
+                peersMap[peer.id] = peer;
+              }
+            });
+            setDetectedPeers(prev => ({ ...prev, ...peersMap }));
+          }
+        } catch (err) {
+          console.error('SSE INIT_SYNC error:', err);
+        }
+      });
+
+      eventSource.addEventListener('SOS_ALERT', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          const { packet, senderDeviceId } = data;
+          if (!packet || senderDeviceId === deviceInstanceId) return;
+
+          // Ingest into extra victim packets & node buffers
+          setExtraVictimPackets(prev => {
+            if (prev.some(p => p.uuid === packet.uuid)) return prev;
+            return [packet, ...prev];
+          });
+
+          setNodes(prev => {
+            const alreadyInB = prev.nodeB.packets.some(p => p.uuid === packet.uuid);
+            if (alreadyInB) return prev;
+            return {
+              ...prev,
+              nodeB: {
+                ...prev.nodeB,
+                packets: [packet, ...prev.nodeB.packets]
+              },
+              nodeC: {
+                ...prev.nodeC,
+                packets: [packet, ...prev.nodeC.packets]
+              }
+            };
+          });
+
+          if (packet.lat && packet.lng) {
+            setDetectedPeers(prev => ({
+              ...prev,
+              [senderDeviceId || packet.uuid]: {
+                id: senderDeviceId || packet.uuid,
+                lat: Number(packet.lat),
+                lng: Number(packet.lng),
+                status: packet.status || 'CRITICAL - TRAPPED',
+                rssi: -58,
+                lastSeen: Date.now()
+              }
+            }));
+          }
+
+          showToast(
+            '🚨 REAL-TIME SOS RECEIVED!',
+            `Victim [${packet.origin_node || packet.uuid}] reported trapped! Coordinates synced in Incident Command.`,
+            'alert'
+          );
+          addLog('MESH', `🚨 Real-Time Emergency SOS Received from Phone [${senderDeviceId || packet.origin_node}]: Status: ${packet.status} | Location: (${Number(packet.lat).toFixed(4)}, ${Number(packet.lng).toFixed(4)})`);
+          
+          if (sonarEngineRef.current) {
+            sonarEngineRef.current.unlockAudioContext();
+          }
+        } catch (err) {
+          console.error('SSE SOS_ALERT error:', err);
+        }
+      });
+
+      eventSource.addEventListener('PEER_HEARTBEAT', (e) => {
+        try {
+          const peer = JSON.parse(e.data);
+          if (!peer || peer.id === deviceInstanceId) return;
+
+          setDetectedPeers(prev => ({
+            ...prev,
+            [peer.id]: {
+              ...peer,
+              lastSeen: Date.now()
+            }
+          }));
+
+          if (peer.isSosActive) {
+            setExtraVictimPackets(prev => {
+              if (prev.some(p => p.origin_id === peer.id || p.uuid === `sos-${peer.id}`)) return prev;
+              return [{
+                uuid: `sos-${peer.id}`,
+                origin_id: peer.id,
+                origin_node: peer.name || `Citizen [${peer.shortId}]`,
+                status: peer.status || 'TRAPPED',
+                priority: 'CRITICAL',
+                medical: peer.medicalInfo || 'Emergency distress signal active',
+                lat: peer.lat,
+                lng: peer.lng,
+                accuracy: peer.accuracy || 4.0,
+                battery: `${peer.battery}%`,
+                altitude: `${peer.altitude}m`,
+                rssi: -65,
+                ttl: 8,
+                hops: 1,
+                timestamp: new Date().toISOString()
+              }, ...prev];
+            });
+          }
+        } catch (err) {}
+      });
+
+      eventSource.addEventListener('PEERS_UPDATE', (e) => {
+        try {
+          const peersList = JSON.parse(e.data);
+          const pMap = {};
+          peersList.forEach(p => {
+            if (p.id !== deviceInstanceId) {
+              pMap[p.id] = p;
+            }
+          });
+          setDetectedPeers(pMap);
+        } catch (err) {}
+      });
+
+      eventSource.addEventListener('STATUS_UPDATE', (e) => {
+        try {
+          const { uuid, deviceId, status } = JSON.parse(e.data);
+          const updatePkt = p => {
+            if (p.uuid === uuid || p.origin_id === deviceId || p.origin_node === deviceId) {
+              return { ...p, status, priority: status === 'SAFE' ? 'LOW' : p.priority };
+            }
+            return p;
+          };
+          setExtraVictimPackets(prev => prev.map(updatePkt));
+          setNodes(prev => ({
+            ...prev,
+            nodeB: { ...prev.nodeB, packets: prev.nodeB.packets.map(updatePkt) },
+            nodeC: { ...prev.nodeC, packets: prev.nodeC.packets.map(updatePkt) }
+          }));
+        } catch (err) {}
+      });
+    } catch (err) {
+      console.warn('SSE stream error:', err);
+    }
+
     return () => {
       if (channel) channel.close();
+      if (eventSource) eventSource.close();
     };
   }, [addLog, showToast, deviceInstanceId]);
 
-  // 3.1 AUTOMATIC CONTINUOUS DISASTER BEACON BROADCASTER (Zero-Touch Peer Mesh Heartbeat)
+  // 3.1 AUTOMATIC CONTINUOUS DISASTER BEACON & SERVER HEARTBEAT
   useEffect(() => {
-    const beaconInterval = setInterval(() => {
+    const sendHeartbeat = () => {
+      const lat = Number(manualCoords.lat) || gpsState.lat || 19.0760;
+      const lng = Number(manualCoords.lng) || gpsState.lng || 72.8777;
+      const isSos = isBeaconActive || nodes.nodeA.status === 'CRITICAL - TRAPPED';
+
+      const heartbeatData = {
+        deviceId: deviceInstanceId,
+        shortId: nodes.nodeA.shortId,
+        name: userProfile.anonymizeNode ? nodes.nodeA.shortId : (userProfile.name || 'Citizen Device'),
+        role: activeTab === 'VICTIM' ? 'VICTIM' : activeTab === 'RESPONDER' ? 'RESPONDER' : 'GATEWAY',
+        lat: lat,
+        lng: lng,
+        accuracy: gpsState.status === 'LOCKED' ? gpsState.accuracy : 4.5,
+        altitude: gpsState.altitude || 18.0,
+        heading: compassHeading || 0,
+        battery: nodes.nodeA.battery,
+        status: nodes.nodeA.status,
+        isSosActive: isSos,
+        medicalInfo: userProfile.includeMedical ? `${userProfile.bloodGroup} (${userProfile.medicalNotes})` : ''
+      };
+
+      // 1. Broadcast over local BroadcastChannel for same-device tabs
       if (broadcastChannelRef.current) {
         try {
-          const lat = Number(manualCoords.lat) || gpsState.lat || 19.0760;
-          const lng = Number(manualCoords.lng) || gpsState.lng || 72.8777;
-          
           broadcastChannelRef.current.postMessage({
             action: 'HEARTBEAT_BEACON',
             senderDeviceId: deviceInstanceId,
@@ -1050,13 +1259,13 @@ export default function App() {
             nodeType: activeTab === 'VICTIM' ? 'VICTIM' : 'RESPONDER',
             packet: {
               uuid: nodes.nodeA.packets[0]?.uuid || `beacon-${deviceInstanceId}`,
-              origin_node: userProfile.anonymizeNode ? nodes.nodeA.shortId : (userProfile.name || 'Citizen Device'),
+              origin_node: heartbeatData.name,
               lat: lat,
               lng: lng,
-              accuracy: gpsState.status === 'LOCKED' ? gpsState.accuracy : 4.5,
-              altitude: gpsState.altitude || 18.0,
-              battery: nodes.nodeA.battery,
-              status: nodes.nodeA.status,
+              accuracy: heartbeatData.accuracy,
+              altitude: heartbeatData.altitude,
+              battery: heartbeatData.battery,
+              status: heartbeatData.status,
               hops: 0,
               ttl: 5,
               timestamp: new Date().toISOString()
@@ -1064,10 +1273,33 @@ export default function App() {
           });
         } catch (e) {}
       }
-    }, 1500);
 
+      // 2. Broadcast to Disaster Mesh Server over HTTP for physical inter-device real-time sync
+      fetch('/api/mesh/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(heartbeatData)
+      }).catch(() => {
+        // Fallback silently if server offline
+      });
+    };
+
+    sendHeartbeat();
+    const beaconInterval = setInterval(sendHeartbeat, 2000);
     return () => clearInterval(beaconInterval);
-  }, [manualCoords, gpsState, deviceInstanceId, activeTab, nodes.nodeA.battery, nodes.nodeA.status, nodes.nodeA.packets, userProfile]);
+  }, [
+    manualCoords,
+    gpsState,
+    deviceInstanceId,
+    activeTab,
+    nodes.nodeA.battery,
+    nodes.nodeA.status,
+    nodes.nodeA.shortId,
+    nodes.nodeA.packets,
+    userProfile,
+    isBeaconActive,
+    compassHeading
+  ]);
 
   // 3.2 AUTO-UNLOCK WEB AUDIO CONTEXT (For Browser Autoplay Policy Compliance)
   useEffect(() => {
@@ -1661,50 +1893,75 @@ export default function App() {
   ]);
 
   // Audible Siren Sound
-  const toggleSirenTone = () => {
-    if (isSirenPlaying) {
+  const startSirenTone = useCallback(() => {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new AudioCtx();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+
       if (oscillatorRef.current) {
         try {
           oscillatorRef.current.stop();
           oscillatorRef.current.disconnect();
         } catch (e) {}
       }
-      setIsSirenPlaying(false);
-      addLog('BEACON', 'Audible rescue siren silenced.');
-    } else {
-      try {
-        const AudioContext = window.AudioContext || window.webkitAudioContext;
-        if (!AudioContext) return;
-        const ctx = new AudioContext();
-        audioCtxRef.current = ctx;
 
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
 
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
 
-        let high = true;
-        const warbleInterval = setInterval(() => {
-          if (!oscillatorRef.current) {
-            clearInterval(warbleInterval);
-            return;
-          }
-          osc.frequency.setValueAtTime(high ? 440 : 880, ctx.currentTime);
+      let high = true;
+      const warbleInterval = setInterval(() => {
+        if (!oscillatorRef.current) {
+          clearInterval(warbleInterval);
+          return;
+        }
+        try {
+          osc.frequency.setValueAtTime(high ? 520 : 960, ctx.currentTime);
           high = !high;
-        }, 300);
+        } catch (e) {
+          clearInterval(warbleInterval);
+        }
+      }, 240);
 
-        gain.gain.setValueAtTime(0.12, ctx.currentTime);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start();
+      gain.gain.setValueAtTime(0.18, ctx.currentTime);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
 
-        oscillatorRef.current = osc;
-        setIsSirenPlaying(true);
-        addLog('BEACON', 'Audible rescue alarm active (880Hz alternating distress tone).');
-      } catch (err) {
-        console.error(err);
-      }
+      oscillatorRef.current = osc;
+      setIsSirenPlaying(true);
+      addLog('BEACON', '🔊 Automatic Audible Rescue Siren Activated (High-Decibel Dual-Tone Emergency Siren).');
+    } catch (err) {
+      console.error('Audible siren error:', err);
+    }
+  }, [addLog]);
+
+  const stopSirenTone = useCallback(() => {
+    if (oscillatorRef.current) {
+      try {
+        oscillatorRef.current.stop();
+        oscillatorRef.current.disconnect();
+      } catch (e) {}
+      oscillatorRef.current = null;
+    }
+    setIsSirenPlaying(false);
+    addLog('BEACON', 'Audible rescue siren silenced.');
+  }, [addLog]);
+
+  const toggleSirenTone = () => {
+    if (isSirenPlaying) {
+      stopSirenTone();
+    } else {
+      startSirenTone();
     }
   };
 
@@ -1775,9 +2032,12 @@ export default function App() {
     setMetrics(prev => ({ ...prev, packetsCreated: prev.packetsCreated + 1 }));
     setIsBeaconActive(true);
 
+    // Automatically trigger audible rescue alarm siren immediately
+    startSirenTone();
+
     addLog('SOS', `🚨 CRITICAL SOS TRIGGERED! Packet [${newPacket.uuid}] generated at Lat: ${lat.toFixed(6)}, Lng: ${lng.toFixed(6)} (±${accuracy}m)${effectiveVoiceTelemetry ? ` • [Telemetry: ${effectiveVoiceTelemetry}]` : ''}.`);
 
-    // Broadcast across real-time Inter-Device channel
+    // 1. Broadcast across local BroadcastChannel
     if (broadcastChannelRef.current) {
       try {
         broadcastChannelRef.current.postMessage({
@@ -1792,8 +2052,34 @@ export default function App() {
       }
     }
 
+    // 2. Transmit to Disaster Mesh Server over HTTP for real-time inter-device sync
+    fetch('/api/mesh/sos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        packet: newPacket,
+        deviceId: deviceInstanceId
+      })
+    }).then(res => res.json()).then(data => {
+      addLog('MESH', `🌐 Real-Time SOS synched to Cloud/Disaster Mesh Gateway (UUID: ${newPacket.uuid}). All connected Rescuers notified.`);
+    }).catch(err => {
+      console.warn('Network SOS push error (local radio mesh active):', err);
+    });
+
     showToast('🚨 SOS Transmitted!', `High-accuracy packet broadcasted locally. Lat: ${lat.toFixed(4)}, Lng: ${lng.toFixed(4)}`, 'alert');
-  }, [manualCoords, gpsState, nodes.nodeA.battery, nodes.nodeA.status, nodes.nodeA.shortId, userProfile, voiceTranscript, addLog, showToast, deviceInstanceId]);
+  }, [
+    manualCoords,
+    gpsState,
+    nodes.nodeA.battery,
+    nodes.nodeA.status,
+    nodes.nodeA.shortId,
+    userProfile,
+    voiceTranscript,
+    addLog,
+    showToast,
+    deviceInstanceId,
+    startSirenTone
+  ]);
 
   // Helper to safely stop voice recognition
   const stopVoiceRecognition = useCallback(() => {
@@ -2867,8 +3153,26 @@ export default function App() {
         isOpen={isBleModalOpen}
         onClose={() => setIsBleModalOpen(false)}
         bleManager={bleManagerRef.current}
+        bleTelemetry={bleTelemetry}
         telemetry={bleTelemetry}
         sonarEngine={sonarEngineRef.current}
+        addLog={addLog}
+        showToast={showToast}
+        onScanAndPair={async () => {
+          if (bleManagerRef.current) {
+            await bleManagerRef.current.requestAndPairDevice();
+          }
+        }}
+        onDisconnect={() => {
+          if (bleManagerRef.current) {
+            bleManagerRef.current.disconnect();
+          }
+        }}
+        onUpdateManualRssi={(rssi, name) => {
+          if (bleManagerRef.current) {
+            bleManagerRef.current.updateManualRssi(rssi, name);
+          }
+        }}
       />
 
       {/* ZERO-INTERNET WEBRTC & ACOUSTIC AUDIO SOUND MODEM P2P PAIRING MODAL */}

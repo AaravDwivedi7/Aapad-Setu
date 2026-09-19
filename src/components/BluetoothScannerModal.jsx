@@ -21,7 +21,9 @@ import { isWebBluetoothSupported } from '../utils/bluetooth';
 export function BluetoothScannerModal({
   isOpen,
   onClose,
+  bleManager,
   bleTelemetry,
+  telemetry,
   onScanAndPair,
   onDisconnect,
   onUpdateManualRssi,
@@ -29,32 +31,54 @@ export function BluetoothScannerModal({
   addLog,
   showToast
 }) {
+  const activeTelemetry = bleTelemetry || telemetry;
   const [isScanning, setIsScanning] = useState(false);
-  const [manualDistance, setManualDistance] = useState(bleTelemetry?.distanceMeters || 12.0);
+  const [manualDistance, setManualDistance] = useState(activeTelemetry?.distanceMeters || 12.0);
   const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [isPulseActive, setIsPulseActive] = useState(false);
   const supported = isWebBluetoothSupported();
 
-  useEffect(() => {
-    if (bleTelemetry?.distanceMeters) {
-      setManualDistance(bleTelemetry.distanceMeters);
+  const safeToast = (title, desc, type = 'info') => {
+    if (typeof showToast === 'function') {
+      showToast(title, desc, type);
+    } else if (typeof addLog === 'function') {
+      addLog('BLE', `${title}: ${desc}`);
     }
-  }, [bleTelemetry]);
+  };
+
+  useEffect(() => {
+    if (activeTelemetry?.distanceMeters) {
+      setManualDistance(activeTelemetry.distanceMeters);
+    }
+  }, [activeTelemetry]);
 
   const handlePairClick = async () => {
     setIsScanning(true);
     try {
-      await onScanAndPair();
-      showToast('🔗 BLE Device Paired', 'Tracking physical Bluetooth RSSI and proximity.', 'success');
+      if (typeof onScanAndPair === 'function') {
+        await onScanAndPair();
+      } else if (bleManager && typeof bleManager.requestAndPairDevice === 'function') {
+        await bleManager.requestAndPairDevice();
+      }
+      safeToast('🔗 BLE Device Paired', 'Tracking physical Bluetooth RSSI and proximity.', 'success');
     } catch (err) {
       if (err?.name === 'NotFoundError') {
-        showToast('ℹ️ Scanner Cancelled', 'No Bluetooth device was selected.', 'info');
+        safeToast('ℹ️ Scanner Cancelled', 'No Bluetooth device was selected.', 'info');
       } else {
-        showToast('⚠️ Bluetooth Error', err?.message || 'Bluetooth scan failed.', 'alert');
+        safeToast('⚠️ Bluetooth Error', err?.message || 'Bluetooth scan failed.', 'alert');
       }
     } finally {
       setIsScanning(false);
     }
+  };
+
+  const handleDisconnect = () => {
+    if (typeof onDisconnect === 'function') {
+      onDisconnect();
+    } else if (bleManager && typeof bleManager.disconnect === 'function') {
+      bleManager.disconnect();
+    }
+    safeToast('🔌 Disconnected', 'Bluetooth device unlinked.', 'info');
   };
 
   const handleSliderChange = (e) => {
@@ -62,7 +86,11 @@ export function BluetoothScannerModal({
     setManualDistance(dist);
     // Approximate RSSI = TxPower - 10 * n * log10(dist)
     const rssi = Math.round(-59 - 25 * Math.log10(dist));
-    onUpdateManualRssi(rssi, 'Calibrated BLE Proximity Beacon');
+    if (typeof onUpdateManualRssi === 'function') {
+      onUpdateManualRssi(rssi, 'Calibrated BLE Proximity Beacon');
+    } else if (bleManager && typeof bleManager.updateManualRssi === 'function') {
+      bleManager.updateManualRssi(rssi, 'Calibrated BLE Proximity Beacon');
+    }
     if (sonarEngine) {
       sonarEngine.updateDistance(dist);
       sonarEngine.emitSinglePulse(dist);
@@ -84,10 +112,10 @@ export function BluetoothScannerModal({
 
   if (!isOpen) return null;
 
-  const rssi = bleTelemetry?.rssi || -72;
-  const distance = bleTelemetry?.distanceMeters || manualDistance;
-  const isConnected = bleTelemetry?.connected || false;
-  const deviceName = bleTelemetry?.name || 'Local BLE Sensor Beacon';
+  const rssi = activeTelemetry?.rssi || -72;
+  const distance = activeTelemetry?.distanceMeters || manualDistance;
+  const isConnected = activeTelemetry?.connected || false;
+  const deviceName = activeTelemetry?.name || 'Local BLE Sensor Beacon';
 
   // Calculate audio interval & pitch for visual feedback
   const intervalMs = sonarEngine ? sonarEngine.calculateIntervalMs(distance) : 800;
@@ -145,10 +173,10 @@ export function BluetoothScannerModal({
 
           <div className="flex items-center justify-between text-sm">
             <span className="text-slate-300 font-semibold">{deviceName}</span>
-            {bleTelemetry?.batteryLevel && (
+            {activeTelemetry?.batteryLevel && (
               <span className="text-xs font-mono text-emerald-400 flex items-center gap-1">
                 <Battery className="w-3.5 h-3.5" />
-                {bleTelemetry.batteryLevel}% Battery
+                {activeTelemetry.batteryLevel}% Battery
               </span>
             )}
           </div>
@@ -170,7 +198,7 @@ export function BluetoothScannerModal({
 
             {isConnected && (
               <button
-                onClick={onDisconnect}
+                onClick={handleDisconnect}
                 className="min-h-[44px] px-3.5 py-2.5 rounded-xl bg-red-950/80 hover:bg-red-900 border border-red-700 text-red-300 text-xs font-bold transition cursor-pointer"
               >
                 Disconnect
