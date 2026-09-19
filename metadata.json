@@ -1,6 +1,7 @@
 {
-  "name": "ResQ: Live Location Emergency Signal & Mesh Relay System",
-  "description": "Real-time high-accuracy GPS emergency signal and opportunistic peer-to-peer mesh relay system with inter-device BroadcastChannel hopping.",
+  "name": "आपद सेतु (Aapad Setu) — Offline Emergency Mesh Network",
+  "description": "Zero-Infrastructure Peer-to-Peer Disaster Telemetry & Offline Emergency Mesh Network with Hardware Sensors.",
   "requestFramePermissions": ["geolocation", "microphone", "camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
+

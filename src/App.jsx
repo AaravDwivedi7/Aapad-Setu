@@ -64,7 +64,7 @@ import {
 
 // Short UUID helper
 function generatePacketId() {
-  return 'resq-' + Math.random().toString(36).substring(2, 9);
+  return 'aapadsetu-' + Math.random().toString(36).substring(2, 9);
 }
 
 // Timestamp helper
@@ -74,7 +74,7 @@ function getLocalTimeStr(date = new Date()) {
 
 export default function App() {
   // Navigation tabs (Two-Role Segregated: 'victim' | 'responder')
-  const [activeTab, setActiveTab] = useState('victim'); // 'victim' (I NEED HELP) | 'responder' (RESCUER / TRIAGE)
+  const [activeTab, setActiveTab] = useState('victim'); // 'victim' (I NEED HELP) | 'responder' (RESCUER DASHBOARD)
 
   // Collapsible Technical Inspector Drawer State (For Hackathon Judges / Coders)
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
@@ -85,9 +85,9 @@ export default function App() {
   });
 
   const [cloudConnectionParams, setCloudConnectionParams] = useState({
-    endpoint: 'https://api.resq.gov/v1/sos_sync',
+    endpoint: 'https://api.aapadsetu.gov.in/v1/sync',
     protocol: 'HTTPS/REST (Simulated)',
-    gatewayId: 'GATEWAY-B2 (Node C)',
+    gatewayId: 'GATEWAY-AS1 (Starlink/5G Uplink)',
     lastSyncTime: null,
     syncing: false
   });
@@ -2283,27 +2283,27 @@ export default function App() {
       </div>
 
       {/* HEADER WITH REAL HARDWARE TELEMETRY */}
-      <header id="resq-top-header" className="border-b border-slate-800 bg-[#0d1424]/95 backdrop-blur sticky top-0 z-40 px-3 sm:px-6 py-3">
+      <header id="aapad-setu-top-header" className="border-b border-slate-800 bg-[#0d1424]/95 backdrop-blur sticky top-0 z-40 px-3 sm:px-6 py-3">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
           
           {/* Logo & Network Status */}
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-red-600 to-red-800 flex items-center justify-center shadow-lg shadow-red-600/30 text-white shrink-0">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-red-600 to-amber-600 flex items-center justify-center shadow-lg shadow-red-600/30 text-white shrink-0">
               <Radio className="w-5 h-5 animate-pulse" />
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="font-extrabold text-xl tracking-tight text-white">ResQ</span>
+                <span className="font-extrabold text-xl tracking-tight text-white">आपद सेतु <span className="text-amber-400 font-sans text-base sm:text-lg font-bold">(Aapad Setu)</span></span>
                 <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-red-950/90 text-red-400 border border-red-800/60">
-                  Mesh Relay System
+                  Offline Emergency Mesh
                 </span>
                 <span className="text-[10px] uppercase font-mono font-bold tracking-wider px-2 py-0.5 rounded bg-indigo-950/90 text-indigo-400 border border-indigo-800/60 flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-ping" />
-                  BroadcastChannel Active
+                  Mesh Protocol Active
                 </span>
               </div>
               <p className="text-xs text-slate-400 hidden sm:block">
-                Live Location Emergency Signal & Multi-Hop Peer-to-Peer Relay Network
+                Zero-Infrastructure Peer-to-Peer Disaster Telemetry &amp; Offline Mesh Network
               </p>
             </div>
           </div>
@@ -2449,7 +2449,7 @@ export default function App() {
                   broadcastsReceived: 0
                 });
                 setIsBeaconActive(false);
-                addLog('SYS', 'ResQ Mesh Simulator reset to initial state.');
+                addLog('SYS', 'Aapad Setu Mesh Simulator reset to initial state.');
               }}
               className="min-h-[40px] min-w-[40px] p-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-400 hover:text-white transition cursor-pointer flex items-center justify-center"
               title="Reset State"
@@ -2461,10 +2461,10 @@ export default function App() {
       </header>
 
       {/* NAVIGATION TABS (TWO DISTINCT ROLES) */}
-      <nav id="resq-nav-tabs" className="border-b border-slate-800 bg-[#0a101d] px-3 sm:px-6">
+      <nav id="aapad-setu-nav-tabs" className="border-b border-slate-800 bg-[#0a101d] px-3 sm:px-6">
         <div className="max-w-7xl mx-auto flex items-center justify-between py-2">
           <div className="flex items-center space-x-2">
-            {/* Tab 1: I NEED HELP (Victim Mode) */}
+            {/* Tab 1: I NEED HELP (Victim / Citizen Mode) */}
             <button
               id="nav-tab-victim"
               onClick={() => setActiveTab('victim')}
@@ -2478,7 +2478,7 @@ export default function App() {
               <span>🆘 I NEED HELP</span>
             </button>
 
-            {/* Tab 2: RESCUER / TRIAGE (Responder Mode) */}
+            {/* Tab 2: RESCUER DASHBOARD (Emergency Responder / Triage Mode) */}
             <button
               id="nav-tab-responder"
               onClick={() => setActiveTab('responder')}
@@ -2489,7 +2489,7 @@ export default function App() {
               }`}
             >
               <Shield className="w-4 h-4 text-white" />
-              <span>🛡️ RESCUER / TRIAGE</span>
+              <span>🛡️ RESCUER DASHBOARD</span>
               {victimAggregator.totalVictims > 0 && (
                 <span className={`px-2 py-0.5 rounded-full font-bold text-[11px] ${
                   victimAggregator.trappedCount > 0 || victimAggregator.criticalCount > 0
@@ -2502,7 +2502,7 @@ export default function App() {
             </button>
           </div>
 
-          {/* Right Action: Network Inspector Drawer Toggle */}
+          {/* Right Action: Protocol Inspector & Telemetry Logs Bottom Sheet Toggle */}
           <button
             id="toggle-network-inspector-btn"
             onClick={() => setIsInspectorOpen(!isInspectorOpen)}
@@ -2513,8 +2513,8 @@ export default function App() {
             }`}
           >
             <Terminal className="w-4 h-4 text-indigo-400" />
-            <span className="hidden sm:inline">Network Inspector &amp; Logs</span>
-            <span className="sm:hidden">Logs</span>
+            <span className="hidden sm:inline">⚙️ Protocol Inspector &amp; Telemetry Logs</span>
+            <span className="sm:hidden">⚙️ Inspector</span>
             {metrics.packetsCreated > 0 && (
               <span className="px-1.5 py-0.2 rounded-full bg-slate-900 border border-slate-700 text-[10px] font-mono text-cyan-300">
                 {metrics.packetsCreated} pkts
@@ -2641,10 +2641,10 @@ export default function App() {
       />
 
       {/* FOOTER */}
-      <footer id="resq-footer" className="border-t border-slate-800/80 bg-[#080c14] px-4 py-3 text-center text-xs text-slate-500">
+      <footer id="aapad-setu-footer" className="border-t border-slate-800/80 bg-[#080c14] px-4 py-3 text-center text-xs text-slate-500">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span>ResQ: Live Location Emergency Signal & Mesh Relay System</span>
-          <span className="font-mono text-[11px]">Store-and-Forward P2P Protocol • Zero Cellular Dependency Core</span>
+          <span>आपद सेतु (Aapad Setu): Zero-Infrastructure Peer-to-Peer Disaster Telemetry</span>
+          <span className="font-mono text-[11px]">Store-and-Forward Mesh Protocol • Low-Latency Field Triage</span>
         </div>
       </footer>
 

@@ -63,10 +63,10 @@ export default function NetworkInspectorDrawer({
             </div>
             <div>
               <h3 className="font-extrabold text-base sm:text-lg text-white">
-                ResQ Network Inspector &amp; Protocol Diagnostics
+                ⚙️ Protocol Inspector &amp; Telemetry Logs (आपद सेतु Mesh)
               </h3>
               <p className="text-xs text-slate-400">
-                Low-level Delay-Tolerant Networking (DTN) packet visualizer, topology trace, and immutable logs.
+                Low-level Delay-Tolerant Networking (DTN) packet visualizer, TTL hop counters, and immutable event logs.
               </p>
             </div>
           </div>
