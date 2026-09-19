@@ -2,6 +2,12 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import VictimMode from './components/VictimMode';
 import ResponderMode from './components/ResponderMode';
 import NetworkInspectorDrawer from './components/NetworkInspectorDrawer';
+import { BluetoothScannerModal } from './components/BluetoothScannerModal';
+import { P2PPairingModal } from './components/P2PPairingModal';
+import { PWAInstallPrompt } from './components/PWAInstallPrompt';
+import { BluetoothMeshManager } from './utils/bluetooth';
+import { SonarAudioEngine } from './utils/sonarAudio';
+import { WebRTCPeerMesh, AcousticSoundModem } from './utils/p2pMesh';
 import {
   Radio,
   Wifi,
@@ -59,6 +65,9 @@ import {
   HeartPulse,
   AlertOctagon,
   Bot,
+  Bluetooth,
+  QrCode,
+  Download,
   X
 } from 'lucide-react';
 
@@ -143,12 +152,16 @@ export default function App() {
 
   // Unique Device ID for Cross-Device Mesh Recognition
   const [deviceInstanceId] = useState(() => {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      const stored = sessionStorage.getItem('resq_device_instance_id');
-      if (stored) return stored;
-      const gen = 'DEV-' + Math.random().toString(36).substring(2, 6).toUpperCase();
-      sessionStorage.setItem('resq_device_instance_id', gen);
-      return gen;
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        const stored = window.sessionStorage.getItem('resq_device_instance_id');
+        if (stored) return stored;
+        const gen = 'DEV-' + Math.random().toString(36).substring(2, 6).toUpperCase();
+        window.sessionStorage.setItem('resq_device_instance_id', gen);
+        return gen;
+      }
+    } catch (e) {
+      // Storage access blocked in cross-origin sandboxed environment
     }
     return 'DEV-' + Math.random().toString(36).substring(2, 6).toUpperCase();
   });
@@ -246,6 +259,7 @@ export default function App() {
   const [voiceSosSupported, setVoiceSosSupported] = useState(true);
   const speechRecognitionRef = useRef(null);
   const isVoiceSosListeningRef = useRef(false);
+  const voiceRestartTimerRef = useRef(null);
 
   // 3. ULTRASONIC / ACOUSTIC PROXIMITY PULSE (GPS-Denied Search Mode)
   const [isAcousticPulseEmitting, setIsAcousticPulseEmitting] = useState(false);
@@ -271,6 +285,17 @@ export default function App() {
     nodeB: true,
     nodeC: true
   });
+
+  // REAL-WORLD HARDWARE BLE & P2P MESH MODALS AND TELEMETRY STATE
+  const [isBleModalOpen, setIsBleModalOpen] = useState(false);
+  const [isP2PModalOpen, setIsP2PModalOpen] = useState(false);
+  const [bleTelemetry, setBleTelemetry] = useState(null);
+  const [p2pConnectionState, setP2pConnectionState] = useState('DISCONNECTED');
+
+  const sonarEngineRef = useRef(null);
+  const bleManagerRef = useRef(null);
+  const p2pMeshRef = useRef(null);
+  const acousticModemRef = useRef(null);
 
   // Proximity Radar Beep & Audio State
   const [isRadarMuted, setIsRadarMuted] = useState(false);
@@ -861,6 +886,48 @@ export default function App() {
     }
   }, [addLog]);
 
+  // INITIALIZE REAL-WORLD HARDWARE ENGINES (Web Bluetooth, Web Audio Sonar, WebRTC P2P DataChannel, Acoustic Modem)
+  useEffect(() => {
+    sonarEngineRef.current = new SonarAudioEngine((pulse) => {
+      // Optional pulse callback
+    });
+    acousticModemRef.current = new AcousticSoundModem();
+
+    bleManagerRef.current = new BluetoothMeshManager(
+      (telemetry) => {
+        setBleTelemetry(telemetry);
+        if (sonarEngineRef.current) {
+          sonarEngineRef.current.updateDistance(telemetry.distanceMeters);
+        }
+      },
+      (tag, msg) => addLog(tag, msg)
+    );
+
+    p2pMeshRef.current = new WebRTCPeerMesh(
+      (packet) => {
+        addLog('P2P', `📦 Direct P2P Disaster Packet [${packet.uuid}] received from physical phone via WebRTC DataChannel!`);
+        showToast('🚨 Real P2P Packet Received!', `Direct telemetry from peer: ${packet.uuid}`, 'alert');
+        setNodes(prev => {
+          const exists = prev.nodeB.packets.some(p => p.uuid === packet.uuid);
+          if (exists) return prev;
+          return {
+            ...prev,
+            nodeB: { ...prev.nodeB, packets: [packet, ...prev.nodeB.packets] }
+          };
+        });
+        setMetrics(m => ({ ...m, packetsRelayed: m.packetsRelayed + 1, hopsCompleted: m.hopsCompleted + 1 }));
+      },
+      (state) => setP2pConnectionState(state),
+      (tag, msg) => addLog(tag, msg)
+    );
+
+    return () => {
+      if (sonarEngineRef.current) sonarEngineRef.current.stop();
+      if (bleManagerRef.current) bleManagerRef.current.disconnect();
+      if (p2pMeshRef.current) p2pMeshRef.current.close();
+    };
+  }, [addLog, showToast]);
+
   // 3. MULTI-DEVICE REAL-TIME SIGNAL HOPPING (BroadcastChannel "resq_mesh_network")
   useEffect(() => {
     let channel;
@@ -968,6 +1035,60 @@ export default function App() {
     };
   }, [addLog, showToast, deviceInstanceId]);
 
+  // 3.1 AUTOMATIC CONTINUOUS DISASTER BEACON BROADCASTER (Zero-Touch Peer Mesh Heartbeat)
+  useEffect(() => {
+    const beaconInterval = setInterval(() => {
+      if (broadcastChannelRef.current) {
+        try {
+          const lat = Number(manualCoords.lat) || gpsState.lat || 19.0760;
+          const lng = Number(manualCoords.lng) || gpsState.lng || 72.8777;
+          
+          broadcastChannelRef.current.postMessage({
+            action: 'HEARTBEAT_BEACON',
+            senderDeviceId: deviceInstanceId,
+            senderNode: activeTab === 'VICTIM' ? 'NODE_A' : 'NODE_B',
+            nodeType: activeTab === 'VICTIM' ? 'VICTIM' : 'RESPONDER',
+            packet: {
+              uuid: nodes.nodeA.packets[0]?.uuid || `beacon-${deviceInstanceId}`,
+              origin_node: userProfile.anonymizeNode ? nodes.nodeA.shortId : (userProfile.name || 'Citizen Device'),
+              lat: lat,
+              lng: lng,
+              accuracy: gpsState.status === 'LOCKED' ? gpsState.accuracy : 4.5,
+              altitude: gpsState.altitude || 18.0,
+              battery: nodes.nodeA.battery,
+              status: nodes.nodeA.status,
+              hops: 0,
+              ttl: 5,
+              timestamp: new Date().toISOString()
+            }
+          });
+        } catch (e) {}
+      }
+    }, 1500);
+
+    return () => clearInterval(beaconInterval);
+  }, [manualCoords, gpsState, deviceInstanceId, activeTab, nodes.nodeA.battery, nodes.nodeA.status, nodes.nodeA.packets, userProfile]);
+
+  // 3.2 AUTO-UNLOCK WEB AUDIO CONTEXT (For Browser Autoplay Policy Compliance)
+  useEffect(() => {
+    const unlockAudio = () => {
+      if (sonarEngineRef.current) {
+        sonarEngineRef.current.unlockAudioContext();
+      }
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume().catch(() => {});
+      }
+    };
+    window.addEventListener('pointerdown', unlockAudio, { passive: true });
+    window.addEventListener('touchstart', unlockAudio, { passive: true });
+    window.addEventListener('keydown', unlockAudio, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('touchstart', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+    };
+  }, []);
+
   // 3.5 BROWSER ONLINE / OFFLINE STANDARD EVENT LISTENERS FOR GATEWAY UPLINK
   useEffect(() => {
     const handleOnline = () => {
@@ -1065,23 +1186,27 @@ export default function App() {
     }
 
     // Attempt to acquire physical camera LED torch if supported
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' }
-      }).then((stream) => {
-        torchStreamRef.current = stream;
-        const track = stream.getVideoTracks()[0];
-        if (track) {
-          const caps = track.getCapabilities ? track.getCapabilities() : {};
-          if ('torch' in caps || caps.torch) {
-            torchTrackRef.current = track;
-            addLog('HARDWARE', '🔦 Device Camera LED Torch acquired for optical Morse SOS broadcasting.');
-            showToast('🔦 Hardware Torch Ready', 'Optical Morse SOS (... --- ...) synchronized with device flash.', 'success');
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
+      try {
+        navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' }
+        }).then((stream) => {
+          torchStreamRef.current = stream;
+          const track = stream.getVideoTracks()[0];
+          if (track) {
+            const caps = track.getCapabilities ? track.getCapabilities() : {};
+            if ('torch' in caps || caps.torch) {
+              torchTrackRef.current = track;
+              addLog('HARDWARE', '🔦 Device Camera LED Torch acquired for optical Morse SOS broadcasting.');
+              showToast('🔦 Hardware Torch Ready', 'Optical Morse SOS (... --- ...) synchronized with device flash.', 'success');
+            }
           }
-        }
-      }).catch(() => {
-        // Fallback silently to screen strobe in sandboxed / desktop environments
-      });
+        }).catch(() => {
+          // Fallback silently to screen strobe in sandboxed / desktop environments
+        });
+      } catch (e) {
+        // Fallback silently
+      }
     }
 
     morseIndexRef.current = 0;
@@ -1355,8 +1480,11 @@ export default function App() {
     // Calculate distance to simulated radar target
     const radarDist = calculateHaversine(rescuerLat, rescuerLng, victimLat, victimLng);
 
-    // Calculate distance to any active external peer detected over BroadcastChannel
-    let effectiveDist = radarDist;
+    // Calculate distance to any active external peer detected over BroadcastChannel or BLE
+    let effectiveDist = (bleTelemetry && bleTelemetry.connected && typeof bleTelemetry.distanceMeters === 'number')
+      ? bleTelemetry.distanceMeters
+      : radarDist;
+
     Object.values(detectedPeers).forEach(peer => {
       if (peer.lat && peer.lng) {
         const pDist = calculateHaversine(victimLat, victimLng, peer.lat, peer.lng);
@@ -1365,6 +1493,10 @@ export default function App() {
         }
       }
     });
+
+    if (sonarEngineRef.current) {
+      sonarEngineRef.current.updateDistance(effectiveDist);
+    }
 
     // Proximity Event Trigger: When target first enters 20m perimeter
     if (effectiveDist <= 20.0 && !wasInProximityRef.current) {
@@ -1663,8 +1795,28 @@ export default function App() {
     showToast('🚨 SOS Transmitted!', `High-accuracy packet broadcasted locally. Lat: ${lat.toFixed(4)}, Lng: ${lng.toFixed(4)}`, 'alert');
   }, [manualCoords, gpsState, nodes.nodeA.battery, nodes.nodeA.status, nodes.nodeA.shortId, userProfile, voiceTranscript, addLog, showToast, deviceInstanceId]);
 
-  // 2. VOICE-ACTIVATED HANDS-FREE SOS TRIGGER (Web Speech API)
-  const toggleVoiceSos = useCallback(() => {
+  // Helper to safely stop voice recognition
+  const stopVoiceRecognition = useCallback(() => {
+    isVoiceSosListeningRef.current = false;
+    setIsVoiceSosListening(false);
+    if (voiceRestartTimerRef.current) {
+      clearTimeout(voiceRestartTimerRef.current);
+      voiceRestartTimerRef.current = null;
+    }
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.onstart = null;
+        speechRecognitionRef.current.onresult = null;
+        speechRecognitionRef.current.onerror = null;
+        speechRecognitionRef.current.onend = null;
+        speechRecognitionRef.current.abort();
+      } catch (e) {}
+      speechRecognitionRef.current = null;
+    }
+  }, []);
+
+  // Helper to safely start voice recognition
+  const startVoiceRecognition = useCallback(() => {
     const SpeechRecognition = typeof window !== 'undefined'
       ? (window.SpeechRecognition || window.webkitSpeechRecognition)
       : null;
@@ -1675,30 +1827,25 @@ export default function App() {
       return;
     }
 
-    if (isVoiceSosListening) {
-      if (speechRecognitionRef.current) {
+    // Clean up any stale instance first
+    stopVoiceRecognition();
+    isVoiceSosListeningRef.current = true;
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
+
+      recognition.onstart = () => {
+        setIsVoiceSosListening(true);
+        setVoiceDetectedKeyword(null);
+        addLog('VOICE', '🎙️ Hands-Free Voice SOS ACTIVE. Continuously listening for trigger keywords: "HELP", "TRAPPED", "INJURED", "STUCK"...');
+        showToast('🎙️ Hands-Free Voice SOS Active', 'Speak "HELP", "TRAPPED", or "INJURED" to trigger SOS burst.', 'success');
+      };
+
+      recognition.onresult = (event) => {
         try {
-          speechRecognitionRef.current.stop();
-        } catch (e) {}
-      }
-      setIsVoiceSosListening(false);
-      addLog('VOICE', '🎙️ Hands-Free Voice SOS deactivated.');
-      showToast('🎙️ Voice SOS Deactivated', 'Hands-free emergency voice monitoring paused.', 'info');
-    } else {
-      try {
-        const recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = 'en-US';
-
-        recognition.onstart = () => {
-          setIsVoiceSosListening(true);
-          setVoiceDetectedKeyword(null);
-          addLog('VOICE', '🎙️ Hands-Free Voice SOS ACTIVE. Continuously listening for trigger keywords: "HELP", "TRAPPED", "INJURED", "STUCK"...');
-          showToast('🎙️ Hands-Free Voice SOS Active', 'Speak "HELP", "TRAPPED", or "INJURED" to trigger SOS burst.', 'success');
-        };
-
-        recognition.onresult = (event) => {
           let currentTranscript = '';
           for (let i = event.resultIndex; i < event.results.length; ++i) {
             currentTranscript += event.results[i][0].transcript;
@@ -1714,34 +1861,62 @@ export default function App() {
             showToast('🚨 VOICE SOS ACTIVATED!', `Trigger keyword "${matched.toUpperCase()}" detected!`, 'alert');
             executeSOSTrigger(`Voice Trigger [${matched.toUpperCase()}]: "${currentTranscript.trim()}"`);
           }
-        };
+        } catch (e) {
+          console.warn('Voice processing error:', e);
+        }
+      };
 
-        recognition.onerror = (event) => {
-          console.warn('Speech recognition error event:', event.error);
-          if (event.error === 'not-allowed') {
-            showToast('⚠️ Microphone Permission Needed', 'Please allow microphone access in your browser.', 'alert');
-            setIsVoiceSosListening(false);
-          }
-        };
+      recognition.onerror = (event) => {
+        console.warn('Speech recognition error event:', event.error);
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          showToast('⚠️ Microphone Permission Needed', 'Please allow microphone access in your browser or iframe.', 'alert');
+          stopVoiceRecognition();
+        }
+      };
 
-        recognition.onend = () => {
-          if (isVoiceSosListeningRef.current) {
-            try {
-              recognition.start();
-            } catch (e) {}
-          } else {
-            setIsVoiceSosListening(false);
-          }
-        };
+      recognition.onend = () => {
+        if (isVoiceSosListeningRef.current) {
+          if (voiceRestartTimerRef.current) clearTimeout(voiceRestartTimerRef.current);
+          voiceRestartTimerRef.current = setTimeout(() => {
+            if (isVoiceSosListeningRef.current) {
+              try {
+                startVoiceRecognition();
+              } catch (e) {
+                console.warn('Voice restart error:', e);
+              }
+            }
+          }, 350);
+        } else {
+          setIsVoiceSosListening(false);
+        }
+      };
 
+      speechRecognitionRef.current = recognition;
+      try {
         recognition.start();
-        speechRecognitionRef.current = recognition;
       } catch (err) {
-        console.error('Speech recognition failed to initialize:', err);
-        showToast('⚠️ Speech Error', 'Failed to start microphone listener.', 'alert');
+        console.warn('recognition.start() error:', err);
+        setIsVoiceSosListening(false);
+        isVoiceSosListeningRef.current = false;
       }
+    } catch (err) {
+      console.error('Speech recognition failed to initialize:', err);
+      showToast('⚠️ Speech Error', 'Failed to start microphone listener.', 'alert');
+      setIsVoiceSosListening(false);
+      isVoiceSosListeningRef.current = false;
     }
-  }, [isVoiceSosListening, addLog, showToast, executeSOSTrigger]);
+  }, [addLog, showToast, executeSOSTrigger, stopVoiceRecognition]);
+
+  // 2. VOICE-ACTIVATED HANDS-FREE SOS TRIGGER (Web Speech API)
+  const toggleVoiceSos = useCallback(() => {
+    if (isVoiceSosListening || isVoiceSosListeningRef.current) {
+      stopVoiceRecognition();
+      addLog('VOICE', '🎙️ Hands-Free Voice SOS deactivated.');
+      showToast('🎙️ Voice SOS Deactivated', 'Hands-free emergency voice monitoring paused.', 'info');
+    } else {
+      startVoiceRecognition();
+    }
+  }, [isVoiceSosListening, stopVoiceRecognition, startVoiceRecognition, addLog, showToast]);
 
   // Simulate Voice Trigger Keyword (Demo / Testing helper)
   const simulateVoiceKeyword = useCallback((keyword = 'HELP') => {
@@ -2228,6 +2403,9 @@ export default function App() {
   return (
     <div id="resq-app-root" className="min-h-screen bg-[#070b13] text-slate-100 flex flex-col font-sans relative selection:bg-red-500 selection:text-white">
 
+      {/* Publication-Ready Progressive Web App Offline Banner */}
+      <PWAInstallPrompt />
+
       {/* Visual Morse Code SOS Screen Strobe Overlay & HUD Banner */}
       {isBeaconActive && (
         <>
@@ -2374,6 +2552,42 @@ export default function App() {
               )}
               <span>{nodes.nodeA.battery}%</span>
             </div>
+
+            {/* Real Hardware Bluetooth Scanner & Dynamic Sonar Beep Action */}
+            <button
+              id="open-ble-scanner-modal-btn"
+              onClick={() => setIsBleModalOpen(true)}
+              className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition cursor-pointer active:scale-95 ${
+                bleTelemetry?.connected
+                  ? 'bg-blue-600/90 border-blue-400 text-white shadow-lg shadow-blue-900/40 animate-pulse'
+                  : 'bg-slate-900/90 hover:bg-slate-800 border-blue-600/60 text-blue-300 hover:text-white'
+              }`}
+              title="Pair real BLE beacon or phone to track RSSI and trigger real-life proximity beep"
+            >
+              <Bluetooth className="w-4 h-4 text-blue-400" />
+              <span className="hidden md:inline">
+                {bleTelemetry?.connected ? `BLE: ${bleTelemetry.distanceMeters.toFixed(1)}m` : 'Bluetooth Proximity'}
+              </span>
+              <span className="md:hidden">BLE</span>
+            </button>
+
+            {/* Offline P2P Phone-to-Phone Mesh Pairing Action */}
+            <button
+              id="open-p2p-pairing-modal-btn"
+              onClick={() => setIsP2PModalOpen(true)}
+              className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition cursor-pointer active:scale-95 ${
+                p2pConnectionState === 'CONNECTED'
+                  ? 'bg-emerald-600/90 border-emerald-400 text-white shadow-lg shadow-emerald-900/40'
+                  : 'bg-slate-900/90 hover:bg-slate-800 border-emerald-600/60 text-emerald-300 hover:text-white'
+              }`}
+              title="Zero-Internet WebRTC DataChannel / Audio Acoustic P2P Mesh Pairing"
+            >
+              <QrCode className="w-4 h-4 text-emerald-400" />
+              <span className="hidden md:inline">
+                {p2pConnectionState === 'CONNECTED' ? 'P2P Online' : 'P2P Phone Link'}
+              </span>
+              <span className="md:hidden">P2P</span>
+            </button>
 
             {/* 1-Click Multi-Hop Pulse */}
             <button
@@ -2559,6 +2773,10 @@ export default function App() {
             addLog={addLog}
             copiedKey={copiedKey}
             copyText={copyText}
+            onOpenBleModal={() => setIsBleModalOpen(true)}
+            onOpenP2PModal={() => setIsP2PModalOpen(true)}
+            bleTelemetry={bleTelemetry}
+            p2pConnectionState={p2pConnectionState}
           />
         ) : (
           <ResponderMode
@@ -2613,6 +2831,10 @@ export default function App() {
             copyText={copyText}
             executeRelayHop={executeRelayHop}
             executeGatewaySync={executeGatewaySync}
+            onOpenBleModal={() => setIsBleModalOpen(true)}
+            onOpenP2PModal={() => setIsP2PModalOpen(true)}
+            bleTelemetry={bleTelemetry}
+            p2pConnectionState={p2pConnectionState}
           />
         )}
       </main>
@@ -2638,6 +2860,43 @@ export default function App() {
         copyText={copyText}
         manualCoords={manualCoords}
         showToast={showToast}
+      />
+
+      {/* REAL-WORLD WEB BLUETOOTH RSSI RADAR & DYNAMIC PROXIMITY BEEPER MODAL */}
+      <BluetoothScannerModal
+        isOpen={isBleModalOpen}
+        onClose={() => setIsBleModalOpen(false)}
+        bleManager={bleManagerRef.current}
+        telemetry={bleTelemetry}
+        sonarEngine={sonarEngineRef.current}
+      />
+
+      {/* ZERO-INTERNET WEBRTC & ACOUSTIC AUDIO SOUND MODEM P2P PAIRING MODAL */}
+      <P2PPairingModal
+        isOpen={isP2PModalOpen}
+        onClose={() => setIsP2PModalOpen(false)}
+        p2pMesh={p2pMeshRef.current}
+        acousticModem={acousticModemRef.current}
+        currentPacket={nodes.nodeA.packets[0] || {
+          uuid: generatePacketId(),
+          timestamp: new Date().toISOString(),
+          lat: Number(manualCoords.lat) || 19.0760,
+          lng: Number(manualCoords.lng) || 72.8777,
+          status: 'CRITICAL - TRAPPED',
+          medical: userProfile.medicalNotes,
+          bloodGroup: userProfile.bloodGroup,
+          contact: userProfile.emergencyContact,
+          battery: nodes.nodeA.battery,
+          hops: 0,
+          ttl: 5
+        }}
+        onPacketReceived={(pkt) => {
+          showToast('🚨 Real P2P Packet Transferred!', `Packet [${pkt.uuid}] received via offline P2P.`, 'alert');
+          setNodes(prev => ({
+            ...prev,
+            nodeB: { ...prev.nodeB, packets: [pkt, ...prev.nodeB.packets] }
+          }));
+        }}
       />
 
       {/* FOOTER */}

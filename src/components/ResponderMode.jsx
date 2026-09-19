@@ -29,7 +29,9 @@ import {
   Server,
   Zap,
   Waves,
-  Mic
+  Mic,
+  Bluetooth,
+  QrCode
 } from 'lucide-react';
 
 export default function ResponderMode({
@@ -83,12 +85,46 @@ export default function ResponderMode({
   copiedKey,
   copyText,
   executeRelayHop,
-  executeGatewaySync
+  executeGatewaySync,
+  onOpenBleModal,
+  onOpenP2PModal,
+  bleTelemetry,
+  p2pConnectionState
 }) {
   const [rosterFilter, setRosterFilter] = useState('ALL');
   const [showGyroSimulator, setShowGyroSimulator] = useState(false);
   // RADAR DISPLAY ORIENTATION: 'HEAD_UP' (Track-Up / Forward Relative) or 'NORTH_UP' (True Geographic North Fixed at 12 o'clock)
   const [radarOrientationMode, setRadarOrientationMode] = useState('HEAD_UP');
+
+  // Motion Trail and Approach Speed Engine
+  const [motionTrail, setMotionTrail] = useState([]);
+  const prevDistRef = React.useRef(22.0);
+  const [closingSpeed, setClosingSpeed] = useState(0);
+  const [isAutoWalking, setIsAutoWalking] = useState(false);
+
+  // Auto-walk continuous simulation loop (1.2 m/s forward approach)
+  React.useEffect(() => {
+    let interval = null;
+    if (isAutoWalking) {
+      interval = setInterval(() => {
+        setRescuerOffset(prev => {
+          const hyp = Math.sqrt(prev.dLat * prev.dLat + prev.dLng * prev.dLng);
+          if (hyp <= 0.000015) { // within ~1.5m
+            setIsAutoWalking(false);
+            return prev;
+          }
+          const stepRatio = 0.000012 / hyp; // ~1.3 meters per tick
+          return {
+            dLat: prev.dLat - prev.dLat * stepRatio,
+            dLng: prev.dLng - prev.dLng * stepRatio
+          };
+        });
+      }, 500);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [isAutoWalking]);
 
   // Live calculation variables for Node A (Victim) & Node B (Rescuer)
   const victimLat = Number(manualCoords.lat) || gpsState.lat || 19.0760;
@@ -117,6 +153,34 @@ export default function ResponderMode({
   // Cardinal Directions
   const targetCardinal = getCardinalDirection(liveBearing);
   const headingCardinal = getCardinalDirection(effectiveHeading);
+
+  // SVG Coordinate Mapping (viewBox="0 0 250 250")
+  const svgCenter = 125;
+  const svgMaxRadius = 96;
+  const currentScale = radarScale;
+
+  // Clamp scaled radius to radar circle
+  const scaledRadius = Math.min(svgMaxRadius, (liveDistance / currentScale) * svgMaxRadius);
+
+  // In Head-Up mode: display angle = relativeBearing. In North-Up mode: display angle = liveBearing
+  const displayPlotAngle = radarOrientationMode === 'HEAD_UP' ? relativeBearing : liveBearing;
+  // Relative angle in radians (SVG 0 rad is East = 90 deg, so subtract 90 deg)
+  const angleRad = ((displayPlotAngle - 90) * Math.PI) / 180;
+  const victimX = svgCenter + scaledRadius * Math.cos(angleRad);
+  const victimY = svgCenter + scaledRadius * Math.sin(angleRad);
+
+  // Update motion trail and speed
+  React.useEffect(() => {
+    const diff = prevDistRef.current - liveDistance;
+    prevDistRef.current = liveDistance;
+    if (Math.abs(diff) > 0.05) {
+      setClosingSpeed(Math.max(0, diff * 1.5));
+    }
+    setMotionTrail(prev => {
+      const p = { x: victimX, y: victimY, dist: liveDistance, id: Date.now() };
+      return [p, ...prev.slice(0, 4)];
+    });
+  }, [victimX, victimY, liveDistance]);
 
   // REAL-TIME TACTICAL TURN GUIDANCE (Shortest signed turn angle between heading and victim bearing)
   // Range: -180° (Turn Left) to +180° (Turn Right)
@@ -159,21 +223,6 @@ export default function ResponderMode({
       arrowSymbol: '▼'
     };
   }
-
-  // SVG Coordinate Mapping (viewBox="0 0 250 250")
-  const svgCenter = 125;
-  const svgMaxRadius = 96;
-  const currentScale = radarScale;
-
-  // Clamp scaled radius to radar circle
-  const scaledRadius = Math.min(svgMaxRadius, (liveDistance / currentScale) * svgMaxRadius);
-
-  // In Head-Up mode: display angle = relativeBearing. In North-Up mode: display angle = liveBearing
-  const displayPlotAngle = radarOrientationMode === 'HEAD_UP' ? relativeBearing : liveBearing;
-  // Relative angle in radians (SVG 0 rad is East = 90 deg, so subtract 90 deg)
-  const angleRad = ((displayPlotAngle - 90) * Math.PI) / 180;
-  const victimX = svgCenter + scaledRadius * Math.cos(angleRad);
-  const victimY = svgCenter + scaledRadius * Math.sin(angleRad);
 
   // Anti-clipping box placement for target tag
   const isTagRightSide = victimX > 135;
@@ -363,6 +412,38 @@ export default function ResponderMode({
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
+            {/* REAL-WORLD BLUETOOTH RSSI & DYNAMIC PROXIMITY BEEPER BUTTON */}
+            <button
+              id="responder-ble-scanner-btn"
+              onClick={onOpenBleModal}
+              className={`min-h-[42px] px-3.5 py-2 rounded-xl text-xs font-bold border transition cursor-pointer shadow flex items-center gap-1.5 ${
+                bleTelemetry?.connected
+                  ? 'bg-blue-600 border-blue-400 text-white animate-pulse shadow-blue-900/50'
+                  : 'bg-slate-900 hover:bg-slate-800 border-blue-600/70 text-blue-300'
+              }`}
+              title="Pair physical BLE hardware device to measure real RSSI and beep dynamically"
+            >
+              <Bluetooth className="w-4 h-4 text-blue-400" />
+              <span>
+                {bleTelemetry?.connected ? `BLE: ${bleTelemetry.distanceMeters.toFixed(1)}m` : '🔍 Real BLE Radar'}
+              </span>
+            </button>
+
+            {/* DIRECT P2P PHONE-TO-PHONE PAIRING BUTTON */}
+            <button
+              id="responder-p2p-pairing-btn"
+              onClick={onOpenP2PModal}
+              className={`min-h-[42px] px-3.5 py-2 rounded-xl text-xs font-bold border transition cursor-pointer shadow flex items-center gap-1.5 ${
+                p2pConnectionState === 'CONNECTED'
+                  ? 'bg-emerald-600 border-emerald-400 text-white shadow-emerald-900/50'
+                  : 'bg-slate-900 hover:bg-slate-800 border-emerald-600/70 text-emerald-300'
+              }`}
+              title="Pair physical responder phone offline via QR or Sound Modem"
+            >
+              <QrCode className="w-4 h-4 text-emerald-400" />
+              <span>{p2pConnectionState === 'CONNECTED' ? 'P2P Online' : '📡 Offline P2P Link'}</span>
+            </button>
+
             {/* COMPASS CALIBRATION BUTTON (FIGURE-8) */}
             <button
               id="calibrate-compass-btn"
@@ -703,17 +784,58 @@ export default function ResponderMode({
                 <line x1={svgCenter} y1={svgCenter} x2={svgCenter} y2={svgCenter - ringMaxPx} stroke="#34d399" strokeWidth="2" opacity="0.8" />
               </g>
 
+              {/* Motion History Trail (Ghost blips showing movement trajectory as object comes closer) */}
+              {motionTrail.map((pt, idx) => {
+                const opacity = Math.max(0.15, 0.65 - idx * 0.15);
+                const r = Math.max(2, 4.5 - idx * 0.8);
+                return (
+                  <circle
+                    key={`trail-${pt.id}-${idx}`}
+                    cx={pt.x}
+                    cy={pt.y}
+                    r={r}
+                    fill="#ef4444"
+                    opacity={opacity}
+                  />
+                );
+              })}
+
               {/* Dashed Target Vector Line from Rescuer to Target */}
               <line
                 x1={svgCenter}
                 y1={svgCenter}
                 x2={victimX}
                 y2={victimY}
-                stroke="#ef4444"
-                strokeWidth="1.5"
-                strokeDasharray="3 3"
-                opacity="0.75"
+                stroke={liveDistance <= 2.0 ? '#ef4444' : liveDistance <= 6.0 ? '#f59e0b' : '#38bdf8'}
+                strokeWidth={liveDistance <= 2.0 ? '2.5' : '1.5'}
+                strokeDasharray={liveDistance <= 2.0 ? 'none' : '3 3'}
+                opacity="0.8"
               />
+
+              {/* Secondary Discovered Mesh Peer Blips (Over BroadcastChannel / BLE) */}
+              {Object.values(detectedPeers || {}).map((peer) => {
+                if (!peer.lat || !peer.lng) return null;
+                const pDist = calculateHaversine(rescuerLat, rescuerLng, peer.lat, peer.lng);
+                const pBearing = calculateBearing(rescuerLat, rescuerLng, peer.lat, peer.lng);
+                const pRelBearing = isOrientationActive ? (pBearing - effectiveHeading + 360) % 360 : pBearing;
+                const pPlotAngle = radarOrientationMode === 'HEAD_UP' ? pRelBearing : pBearing;
+                const pRad = ((pPlotAngle - 90) * Math.PI) / 180;
+                const pScaledR = Math.min(svgMaxRadius, (pDist / currentScale) * svgMaxRadius);
+                const px = svgCenter + pScaledR * Math.cos(pRad);
+                const py = svgCenter + pScaledR * Math.sin(pRad);
+                const isVeryClose = pDist <= 5.0;
+
+                return (
+                  <g key={`mesh-peer-${peer.id}`} transform={`translate(${px}, ${py})`}>
+                    <circle r={isVeryClose ? 6 : 4} fill={isVeryClose ? '#ef4444' : '#06b6d4'} stroke="#ffffff" strokeWidth="1.2" opacity="0.95">
+                      {isVeryClose && <animate attributeName="r" values="5;10;5" dur="0.8s" repeatCount="indefinite" />}
+                    </circle>
+                    <text x="7" y="3" fill="#38bdf8" fontSize="6.5" fontWeight="bold" fontFamily="monospace">
+                      {peer.id ? peer.id.substring(0, 8) : 'PEER'} ({pDist.toFixed(1)}m)
+                    </text>
+                  </g>
+                );
+              })}
 
               {/* Secondary Multi-Victim Casualty Blips (if any exist in incident command) */}
               {victimAggregator?.victimsList?.filter(v => v.uuid !== nodes.nodeA.uuid).map((v) => {
@@ -739,19 +861,36 @@ export default function ResponderMode({
 
               {/* Primary Target Dot: Node A (Victim - Live Target) */}
               <g transform={`translate(${victimX}, ${victimY})`} id="target-victim-blip">
-                <circle r="14" fill="none" stroke="#ef4444" strokeWidth="1.5" opacity="0.85">
-                  <animate attributeName="r" values="5;20" dur="1.2s" repeatCount="indefinite" />
-                  <animate attributeName="opacity" values="1;0" dur="1.2s" repeatCount="indefinite" />
-                </circle>
-                <circle r="5.5" fill="#ef4444" stroke="#ffffff" strokeWidth="1.5" />
+                {/* Dynamic Doppler / Proximity Lock-On Reticle */}
+                {liveDistance <= 2.0 ? (
+                  <g className="animate-spin" style={{ transformOrigin: '0px 0px', animationDuration: '3s' }}>
+                    <circle r="18" fill="none" stroke="#ef4444" strokeWidth="2" strokeDasharray="6 4" opacity="0.9" />
+                    <polygon points="0,-22 4,-16 -4,-16" fill="#ef4444" />
+                    <polygon points="22,0 16,4 16,-4" fill="#ef4444" />
+                    <polygon points="0,22 4,16 -4,16" fill="#ef4444" />
+                    <polygon points="-22,0 -16,4 -16,-4" fill="#ef4444" />
+                  </g>
+                ) : (
+                  <circle r="14" fill="none" stroke={liveDistance <= 6.0 ? '#f59e0b' : '#ef4444'} strokeWidth="1.5" opacity="0.85">
+                    <animate attributeName="r" values="5;22" dur={liveDistance <= 5.0 ? '0.6s' : '1.2s'} repeatCount="indefinite" />
+                    <animate attributeName="opacity" values="1;0" dur={liveDistance <= 5.0 ? '0.6s' : '1.2s'} repeatCount="indefinite" />
+                  </circle>
+                )}
+                
+                <circle
+                  r={liveDistance <= 2.0 ? '7' : '5.5'}
+                  fill={liveDistance <= 2.0 ? '#ef4444' : liveDistance <= 6.0 ? '#f59e0b' : '#ef4444'}
+                  stroke="#ffffff"
+                  strokeWidth="1.8"
+                />
                 
                 {/* Anti-clipping Dynamic Callout Box */}
-                <rect x={tagBoxX} y={tagBoxY} width="76" height="22" rx="4" fill="#0f172a" fillOpacity="0.9" stroke="#ef4444" strokeWidth="0.8" />
-                <text x={tagBoxX + 4} y={tagBoxY + 9} fill="#ffffff" fontSize="7.5" fontWeight="bold" fontFamily="monospace">
-                  Victim ({liveDistance.toFixed(1)}m)
+                <rect x={tagBoxX} y={tagBoxY} width="78" height="24" rx="4" fill="#0f172a" fillOpacity="0.95" stroke={liveDistance <= 2.0 ? '#ef4444' : '#38bdf8'} strokeWidth="1" />
+                <text x={tagBoxX + 4} y={tagBoxY + 10} fill="#ffffff" fontSize="7.5" fontWeight="extrabold" fontFamily="monospace">
+                  {liveDistance <= 2.0 ? '🎯 LOCK-ON' : 'Victim'} ({liveDistance.toFixed(1)}m)
                 </text>
-                <text x={tagBoxX + 4} y={tagBoxY + 17} fill="#93c5fd" fontSize="6.5" fontFamily="monospace">
-                  {targetCardinal} ({liveBearing.toFixed(0)}°)
+                <text x={tagBoxX + 4} y={tagBoxY + 18} fill="#93c5fd" fontSize="6.5" fontFamily="monospace">
+                  {targetCardinal} ({liveBearing.toFixed(0)}°) • {liveRSSI}dBm
                 </text>
               </g>
 
@@ -763,23 +902,23 @@ export default function ResponderMode({
               </g>
             </svg>
 
-            {/* Radar Telemetry Footer */}
+            {/* Radar Telemetry Footer with Live Approach Speed */}
             <div className="w-full mt-3 pt-2.5 border-t border-slate-800 text-[11px] font-mono text-slate-400 flex items-center justify-between flex-wrap gap-2">
-              <span>Dist: <strong className="text-emerald-400 font-bold">{liveDistance.toFixed(1)}m</strong></span>
-              <span>True Bearing: <strong className="text-cyan-400 font-bold">{liveBearing.toFixed(0)}° {targetCardinal}</strong></span>
-              <span>Rel Angle: <strong className="text-amber-300 font-bold">{relativeBearing.toFixed(0)}°</strong></span>
+              <span>Dist: <strong className={liveDistance <= 2.0 ? 'text-red-400 font-extrabold animate-pulse' : liveDistance <= 6.0 ? 'text-amber-400 font-bold' : 'text-emerald-400 font-bold'}>{liveDistance.toFixed(1)}m</strong></span>
+              <span>Bearing: <strong className="text-cyan-400 font-bold">{liveBearing.toFixed(0)}° {targetCardinal}</strong></span>
+              <span>Speed: <strong className="text-amber-300 font-bold">{closingSpeed > 0 ? `${closingSpeed.toFixed(1)} m/s` : 'Stationary'}</strong></span>
               <span>RSSI: <strong className="text-amber-400 font-bold">{liveRSSI} dBm</strong></span>
             </div>
           </div>
 
           {/* Interactive Controls & Directional Pad */}
           <div className="lg:col-span-6 space-y-4">
-            {/* Live Distance Slider */}
-            <div className="bg-slate-900/80 p-4 rounded-xl border border-slate-800 space-y-2">
+            {/* Live Distance Slider & Real-Time Walk Simulator */}
+            <div className="bg-slate-900/80 p-4 rounded-xl border border-slate-800 space-y-3">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-bold text-white flex items-center gap-1.5">
                   <Sliders className="w-4 h-4 text-emerald-400" />
-                  Proximity Distance Simulation:
+                  Proximity Distance Tracker:
                 </span>
                 <span className="font-mono text-emerald-400 font-bold">{liveDistance.toFixed(1)} meters</span>
               </div>
@@ -806,6 +945,23 @@ export default function ResponderMode({
                   Step Away (+3.0m)
                 </button>
               </div>
+
+              {/* Real-time Continuous Approach Walk Button */}
+              <button
+                onClick={() => {
+                  if (liveDistance <= 2.0 && !isAutoWalking) {
+                    setRescuerOffset({ dLat: -0.00022, dLng: -0.00018 }); // reset to ~30m
+                  }
+                  setIsAutoWalking(prev => !prev);
+                }}
+                className={`w-full py-2.5 px-4 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer border ${
+                  isAutoWalking
+                    ? 'bg-amber-600 text-white border-amber-400 animate-pulse'
+                    : 'bg-emerald-950/80 text-emerald-300 border-emerald-600 hover:bg-emerald-900'
+                }`}
+              >
+                <span>{isAutoWalking ? '⏸ Pause Continuous Approach Walk' : '🚶 Simulate Real-Time Walk to Target (Test Radar & Acoustic Beep)'}</span>
+              </button>
             </div>
 
             {/* D-Pad Rescuer Motion with exact geographic coordinates */}

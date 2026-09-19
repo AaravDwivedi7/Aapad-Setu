@@ -21,7 +21,9 @@ import {
   MicOff,
   Flashlight,
   Sparkles,
-  Activity
+  Activity,
+  Bluetooth,
+  QrCode
 } from 'lucide-react';
 
 export default function VictimMode({
@@ -55,7 +57,11 @@ export default function VictimMode({
   setBatteryAlertBanner,
   addLog,
   copiedKey,
-  copyText
+  copyText,
+  onOpenBleModal,
+  onOpenP2PModal,
+  bleTelemetry,
+  p2pConnectionState
 }) {
   const currentPacket = nodes.nodeA.packets?.[0];
   const isEmergencyActive = nodes.nodeA.packets.length > 0;
@@ -542,6 +548,78 @@ export default function VictimMode({
               className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono"
             />
           </div>
+        </div>
+      </div>
+
+      {/* PHYSICAL HARDWARE BLUETOOTH & ZERO-INTERNET P2P PEER ACTIONS */}
+      <div className="bg-gradient-to-r from-blue-950/40 via-indigo-950/30 to-purple-950/40 border border-blue-800/60 rounded-2xl p-5 shadow-lg space-y-3">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-blue-900/50 pb-2.5">
+          <div>
+            <h4 className="font-bold text-white text-sm flex items-center gap-2">
+              <Radio className="w-4 h-4 text-blue-400" />
+              Real Physical Phone &amp; Bluetooth Proximity Hardware
+            </h4>
+            <p className="text-xs text-slate-300 mt-0.5">
+              Connect real-life Bluetooth beacons or pair two physical phones offline without cellular/Wi-Fi.
+            </p>
+          </div>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-950 border border-blue-700 text-blue-300 font-bold">
+            Web Bluetooth &amp; WebRTC
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+          <button
+            type="button"
+            onClick={onOpenBleModal}
+            className={`min-h-[44px] p-3 rounded-xl border flex items-center justify-between gap-3 text-left transition cursor-pointer ${
+              bleTelemetry?.connected
+                ? 'bg-blue-900/60 border-blue-400 text-white shadow-lg shadow-blue-950/60'
+                : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700 text-slate-200'
+            }`}
+          >
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-lg bg-blue-600/30 text-blue-400">
+                <Bluetooth className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-white">
+                  {bleTelemetry?.connected ? 'Real BLE Connected' : 'Scan & Track Real BLE Device'}
+                </div>
+                <div className="text-[11px] text-slate-400 font-mono">
+                  {bleTelemetry?.connected
+                    ? `${bleTelemetry.deviceName} • ${bleTelemetry.distanceMeters.toFixed(1)}m`
+                    : 'Pair beacon for dynamic audio beep'}
+                </div>
+              </div>
+            </div>
+            <span className="text-xs text-blue-400 font-bold">Open →</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenP2PModal}
+            className={`min-h-[44px] p-3 rounded-xl border flex items-center justify-between gap-3 text-left transition cursor-pointer ${
+              p2pConnectionState === 'CONNECTED'
+                ? 'bg-emerald-900/60 border-emerald-400 text-white shadow-lg shadow-emerald-950/60'
+                : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700 text-slate-200'
+            }`}
+          >
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-lg bg-emerald-600/30 text-emerald-400">
+                <QrCode className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-white">
+                  {p2pConnectionState === 'CONNECTED' ? 'P2P DataChannel Online' : 'Pair 2nd Phone (Zero-Internet)'}
+                </div>
+                <div className="text-[11px] text-slate-400 font-mono">
+                  {p2pConnectionState === 'CONNECTED' ? 'Direct P2P Link Established' : 'WebRTC QR or Acoustic Sound Modem'}
+                </div>
+              </div>
+            </div>
+            <span className="text-xs text-emerald-400 font-bold">Pair →</span>
+          </button>
         </div>
       </div>
 
