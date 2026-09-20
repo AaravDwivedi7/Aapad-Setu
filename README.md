@@ -1,4 +1,4 @@
-# RESQ — Resilient Emergency Signal & Rescue Network
+# Aapad Setu
 
 > **Offline-first, opportunistic peer-to-peer store-and-forward emergency mesh network for post-disaster scenarios.**
 
