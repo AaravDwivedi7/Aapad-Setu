@@ -22,20 +22,58 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script>
       (function() {
+        function shouldSuppress(arg) {
+          if (!arg) return false;
+          try {
+            const str = typeof arg === 'string' ? arg : (arg.message || arg.reason || arg.stack || JSON.stringify(arg) || String(arg));
+            return typeof str === 'string' && (
+              str.includes('[vite]') ||
+              str.includes('websocket') ||
+              str.includes('WebSocket') ||
+              str.includes('connection lost') ||
+              str.includes('failed to connect') ||
+              str.includes('vite-plugin-pwa')
+            );
+          } catch (e) {
+            return false;
+          }
+        }
+
         const origErr = console.error;
         const origWarn = console.warn;
+        const origLog = console.log;
+        const origInfo = console.info;
+
         console.error = function(...args) {
-          if (typeof args[0] === 'string' && (args[0].includes('[vite]') || args[0].includes('websocket') || args[0].includes('connection lost'))) {
-            return;
-          }
+          if (args.some(shouldSuppress)) return;
           origErr.apply(console, args);
         };
         console.warn = function(...args) {
-          if (typeof args[0] === 'string' && (args[0].includes('[vite]') || args[0].includes('websocket') || args[0].includes('connection lost'))) {
-            return;
-          }
+          if (args.some(shouldSuppress)) return;
           origWarn.apply(console, args);
         };
+        console.log = function(...args) {
+          if (args.some(shouldSuppress)) return;
+          origLog.apply(console, args);
+        };
+        console.info = function(...args) {
+          if (args.some(shouldSuppress)) return;
+          origInfo.apply(console, args);
+        };
+
+        window.addEventListener('error', function(e) {
+          if (shouldSuppress(e.message) || shouldSuppress(e.error)) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+          }
+        }, true);
+
+        window.addEventListener('unhandledrejection', function(e) {
+          if (shouldSuppress(e.reason)) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+          }
+        }, true);
       })();
     </script>
   </head>

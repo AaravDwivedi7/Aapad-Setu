@@ -2,6 +2,14 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 
+interface VictimProfile {
+  name?: string;
+  bloodGroup?: string;
+  healthIssues?: string;
+  emergencyContact?: string;
+  notes?: string;
+}
+
 interface MeshPeer {
   id: string;
   shortId: string;
@@ -16,6 +24,7 @@ interface MeshPeer {
   status: 'CRITICAL - TRAPPED' | 'INJURED' | 'SAFE' | 'SEARCHING' | 'RESCUING';
   isSosActive: boolean;
   medicalInfo?: string;
+  victimProfile?: VictimProfile;
   lastSeen: number;
 }
 
@@ -24,6 +33,9 @@ interface SosPacket {
   uuid: string;
   origin_node: string;
   deviceId: string;
+  callsign?: string;
+  victimName?: string;
+  victimProfile?: VictimProfile;
   lat: number;
   lng: number;
   lon?: number;
@@ -107,8 +119,12 @@ async function startServer() {
     };
     res.write(`event: INIT_SYNC\ndata: ${JSON.stringify(initialData)}\n\n`);
 
+    // Notify all peers of the updated mesh client count
+    broadcastSSE('PEERS_UPDATE', Array.from(activePeers.values()));
+
     req.on('close', () => {
       sseClients.delete(res);
+      broadcastSSE('PEERS_UPDATE', Array.from(activePeers.values()));
     });
   });
 
@@ -117,13 +133,14 @@ async function startServer() {
     res.json({
       peers: Array.from(activePeers.values()),
       packets: Array.from(activePackets.values()),
+      connectedClients: sseClients.size,
       timestamp: new Date().toISOString()
     });
   });
 
   // 4. Live Device Heartbeat (transmits GPS & Status automatically)
   app.post('/api/mesh/heartbeat', (req, res) => {
-    const { deviceId, shortId, name, role, lat, lng, accuracy, altitude, heading, battery, status, isSosActive, medicalInfo } = req.body;
+    const { deviceId, shortId, name, role, lat, lng, accuracy, altitude, heading, battery, status, isSosActive, medicalInfo, victimProfile } = req.body;
     if (!deviceId) {
       return res.status(400).json({ error: 'deviceId required' });
     }
@@ -131,7 +148,7 @@ async function startServer() {
     const peer: MeshPeer = {
       id: deviceId,
       shortId: shortId || deviceId.substring(0, 8),
-      name: name || 'Citizen Phone',
+      name: (victimProfile?.name && victimProfile.name.trim()) || name || 'Citizen Node',
       role: role || 'VICTIM',
       lat: typeof lat === 'number' ? lat : 19.0760,
       lng: typeof lng === 'number' ? lng : 72.8777,
@@ -141,14 +158,19 @@ async function startServer() {
       battery: typeof battery === 'number' ? battery : 90,
       status: status || 'SAFE',
       isSosActive: Boolean(isSosActive),
-      medicalInfo: medicalInfo || '',
+      medicalInfo: medicalInfo || (victimProfile?.healthIssues ? `Blood: ${victimProfile?.bloodGroup || 'N/A'}, Medical: ${victimProfile?.healthIssues}` : ''),
+      victimProfile: victimProfile || undefined,
       lastSeen: Date.now()
     };
 
+    const isNewPeer = !activePeers.has(deviceId);
     activePeers.set(deviceId, peer);
     broadcastSSE('PEER_HEARTBEAT', peer);
+    if (isNewPeer) {
+      broadcastSSE('PEERS_UPDATE', Array.from(activePeers.values()));
+    }
 
-    res.json({ success: true, peer });
+    res.json({ success: true, peer, totalPeers: activePeers.size });
   });
 
   // 5. Emergency SOS Broadcast (Instant broadcast across all connected phones)
@@ -158,15 +180,20 @@ async function startServer() {
       return res.status(400).json({ error: 'Invalid packet payload' });
     }
 
-    const packetId = packet.uuid || packet.id || ('aapad-' + Math.random().toString(36).substring(2, 9));
+    const nodeOrigin = packet.origin_node || packet.originNode || (deviceId ? `Node-${deviceId}` : 'Citizen Device');
+    const persistentId = packet.id || deviceId || nodeOrigin;
+    const packetId = packet.uuid || ('SOS_' + persistentId + '_' + Date.now());
     const latitude = Number(packet.lat) || 19.0760;
     const longitude = Number(packet.lon ?? packet.lng) || 72.8777;
 
     const sosPacket: SosPacket = {
       uuid: packetId,
-      id: packetId,
-      origin_node: packet.origin_node || (deviceId ? `Node-${deviceId}` : 'Citizen Device'),
-      deviceId: deviceId || packet.origin_node || 'UNKNOWN-DEV',
+      id: persistentId,
+      origin_node: nodeOrigin,
+      deviceId: deviceId || persistentId,
+      callsign: packet.callsign || nodeOrigin,
+      victimName: packet.victimName || packet.victimProfile?.name || undefined,
+      victimProfile: packet.victimProfile || undefined,
       lat: latitude,
       lng: longitude,
       lon: longitude,
@@ -176,23 +203,26 @@ async function startServer() {
       status: packet.status || 'CRITICAL',
       targetRole: packet.targetRole || 'RESPONDER_ONLY',
       voiceNote: packet.voiceNote || '',
-      medical: packet.medical || '',
+      medical: packet.medical || packet.victimProfile?.healthIssues || '',
       hops: Number(packet.hops) || 0,
       ttl: Number(packet.ttl) || 5,
       timestamp: packet.timestamp || new Date().toISOString(),
       payload: packet.payload || {
-        msg: '🚨 SOS: Citizen in distress! Immediate extraction required.',
+        msg: packet.distressMessage || '🚨 SOS: Citizen in distress! Immediate extraction required.',
         level: 'CRITICAL'
       }
     };
 
-    activePackets.set(sosPacket.uuid, sosPacket);
+    // Store exactly ONE active packet record per device to eliminate duplicate victims
+    const packetStoreKey = deviceId || persistentId || sosPacket.uuid;
+    activePackets.set(packetStoreKey, sosPacket);
 
     // Update peer state as SOS active
     if (deviceId && activePeers.has(deviceId)) {
       const p = activePeers.get(deviceId)!;
       p.isSosActive = true;
-      p.status = sosPacket.status as any;
+      p.status = (sosPacket.status as any) || 'CRITICAL - TRAPPED';
+      if (sosPacket.victimProfile) p.victimProfile = sosPacket.victimProfile;
       p.lastSeen = Date.now();
       activePeers.set(deviceId, p);
     }
@@ -209,11 +239,18 @@ async function startServer() {
   // 6. Update Victim / Incident Status (e.g. Rescued / Safe)
   app.post('/api/mesh/status', (req, res) => {
     const { uuid, deviceId, status } = req.body;
-    if (uuid && activePackets.has(uuid)) {
-      const pkt = activePackets.get(uuid)!;
-      pkt.status = status;
-      activePackets.set(uuid, pkt);
+    
+    // Update matching packets across activePackets
+    for (const [key, pkt] of activePackets.entries()) {
+      if (pkt.uuid === uuid || pkt.id === uuid || pkt.id === deviceId || pkt.deviceId === deviceId || key === deviceId) {
+        pkt.status = status;
+        if (status === 'SAFE') {
+          // Keep it marked safe
+          pkt.status = 'SAFE';
+        }
+      }
     }
+
     if (deviceId && activePeers.has(deviceId)) {
       const p = activePeers.get(deviceId)!;
       p.status = status;
@@ -230,10 +267,7 @@ async function startServer() {
   // Vite middleware in dev or static files in production
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: false,
-      },
+      server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);

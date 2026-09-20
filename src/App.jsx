@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import Peer from 'peerjs';
 import L from 'leaflet';
+import EmergencyProfileModal from './components/EmergencyProfileModal';
 import {
   AlertTriangle,
   Radio,
@@ -39,6 +40,9 @@ import {
   RotateCcw,
   UserCheck,
   User,
+  Heart,
+  Edit3,
+  Sliders,
   X
 } from 'lucide-react';
 
@@ -90,6 +94,12 @@ const INITIAL_DEMO_CASUALTIES = [
     id: 'CASUALTY_ALPHA_104',
     uuid: 'SOS_CASUALTY_ALPHA_104',
     victimName: 'Rahul Sharma',
+    victimProfile: {
+      name: 'Rahul Sharma',
+      bloodGroup: 'O+',
+      healthIssues: 'Asthma (Carries Inhaler), Dust Allergy',
+      emergencyContact: '+91 98201 45678 (Father)'
+    },
     callsign: 'Rahul Sharma [ALPHA-104]',
     lat: DEFAULT_COORDS.lat + 0.00045,
     lng: DEFAULT_COORDS.lng + 0.00035,
@@ -104,6 +114,12 @@ const INITIAL_DEMO_CASUALTIES = [
     id: 'CASUALTY_BRAVO_209',
     uuid: 'SOS_CASUALTY_BRAVO_209',
     victimName: 'Ananya Verma',
+    victimProfile: {
+      name: 'Ananya Verma',
+      bloodGroup: 'B+',
+      healthIssues: 'Type 1 Diabetic (Insulin Dependent)',
+      emergencyContact: '+91 98192 34567 (Spouse)'
+    },
     callsign: 'Ananya Verma [BRAVO-209]',
     lat: DEFAULT_COORDS.lat - 0.00038,
     lng: DEFAULT_COORDS.lng + 0.00048,
@@ -174,21 +190,57 @@ export default function App() {
   });
   const [myCallsign] = useState(generateCallsign);
 
-  // Prior Civilian Name Registration (Saved locally to avoid any identity confusion)
-  const [victimName, setVictimName] = useState(() => {
-    return localStorage.getItem('aapad_victim_name') || '';
+  // Prior Civilian Emergency & Medical Profile (Persisted in localStorage)
+  const [victimProfile, setVictimProfile] = useState(() => {
+    try {
+      const saved = localStorage.getItem('aapad_civilian_profile');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    const legacyName = localStorage.getItem('aapad_victim_name') || '';
+    return {
+      name: legacyName,
+      bloodGroup: 'O+',
+      healthIssues: '',
+      emergencyContact: '',
+      notes: ''
+    };
   });
+
+  // Automatically prompt new users on first launch to setup their emergency medical profile
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(() => {
+    const saved = localStorage.getItem('aapad_civilian_profile');
+    const legacyName = localStorage.getItem('aapad_victim_name');
+    return !saved && !legacyName;
+  });
+
+  const [victimName, setVictimName] = useState(() => {
+    return victimProfile.name || localStorage.getItem('aapad_victim_name') || '';
+  });
+
+  const handleSaveVictimProfile = useCallback((newProfile) => {
+    setVictimProfile(newProfile);
+    setVictimName(newProfile.name || '');
+    localStorage.setItem('aapad_civilian_profile', JSON.stringify(newProfile));
+    localStorage.setItem('aapad_victim_name', newProfile.name || '');
+    setNotificationMsg('✅ Emergency Medical Profile saved securely on device!');
+    setTimeout(() => setNotificationMsg(null), 3500);
+  }, []);
 
   const handleUpdateVictimName = useCallback((name) => {
     setVictimName(name);
+    setVictimProfile(prev => {
+      const updated = { ...prev, name };
+      localStorage.setItem('aapad_civilian_profile', JSON.stringify(updated));
+      return updated;
+    });
     localStorage.setItem('aapad_victim_name', name);
   }, []);
 
   // Compute clean display identity combining human name and callsign
   const effectiveCallsign = useMemo(() => {
-    const trimmed = victimName.trim();
+    const trimmed = (victimProfile.name || victimName).trim();
     return trimmed ? `${trimmed} [${myCallsign}]` : myCallsign;
-  }, [victimName, myCallsign]);
+  }, [victimProfile.name, victimName, myCallsign]);
 
   // High-Accuracy GPS Triangulation during Button Hold
   const [isHoldingTrigger, setIsHoldingTrigger] = useState(false);
@@ -210,8 +262,18 @@ export default function App() {
   const peerInstanceRef = useRef(null);
   const [meshStatus, setMeshStatus] = useState('INITIALIZING'); // 'CONNECTED' | 'SEARCHING' | 'OFFLINE'
   const [connectedPeers, setConnectedPeers] = useState([]);
+  const [meshPeersMap, setMeshPeersMap] = useState({}); // deviceId -> MeshPeer
+  const [radiusFilterMeters, setRadiusFilterMeters] = useState(1000); // 500m, 1km, 2km, 5km, 0 = all
   const activeConnectionsRef = useRef(new Map());
   const broadcastChannelRef = useRef(null);
+
+  // Dynamic Telemetry Refs to prevent unnecessary effect teardowns
+  const latestGpsRef = useRef(DEFAULT_COORDS);
+  const latestBatteryRef = useRef(88);
+  const latestDistressRef = useRef({ isDistressActive: false, distressStatus: 'TRAPPED' });
+  const latestProfileRef = useRef(victimProfile);
+  const latestRoleRef = useRef(activeRole);
+  const latestCallsignRef = useRef(effectiveCallsign);
 
   // Hardware Telemetry: GPS & Battery
   const [gpsLocation, setGpsLocation] = useState(DEFAULT_COORDS);
@@ -540,11 +602,12 @@ export default function App() {
 
   // Inbound Packet Processing with Strict Role-Based Rules
   const handleIncomingPacket = useCallback((pkt) => {
-    if (!pkt || !pkt.uuid) return;
+    if (!pkt || (!pkt.uuid && !pkt.id)) return;
+    const packetUuid = pkt.uuid || pkt.id || ('PKT_' + Math.random().toString(36).substring(2, 9));
 
-    // Deduplication check
-    const isNewPacket = !seenPacketsSetRef.current.has(pkt.uuid);
-    seenPacketsSetRef.current.add(pkt.uuid);
+    // Deduplication check for this individual packet transmission
+    const isNewPacket = !seenPacketsSetRef.current.has(packetUuid);
+    seenPacketsSetRef.current.add(packetUuid);
 
     // ==========================================
     // ROLE-BASED ROUTING LOGIC
@@ -554,7 +617,7 @@ export default function App() {
       if (isNewPacket && pkt.hopCount < 10) {
         // Re-broadcast to adjacent nodes (DTN Store-and-Forward)
         broadcastMeshPacket(pkt);
-        addLog('MESH', `📦 Relayed packet ${pkt.uuid.substring(0, 8)} for casualty ${pkt.callsign || pkt.id}`);
+        addLog('MESH', `📦 Relayed packet ${packetUuid.substring(0, 8)} for casualty ${pkt.victimName || pkt.callsign || pkt.id}`);
       }
       return;
     }
@@ -562,23 +625,42 @@ export default function App() {
     // RESPONDER MODE: Full tactical triage processing
     if (pkt.targetRole === 'RESPONDER_ONLY' || pkt.targetRole === 'ALL' || !pkt.targetRole) {
       const coords = sanitizeCoords(pkt.lat, pkt.lng ?? pkt.lon);
+      const victimId = pkt.id || pkt.deviceId || pkt.originNode || pkt.senderNode || packetUuid;
+      const vName = pkt.victimName || pkt.victimProfile?.name || (pkt.callsign && pkt.callsign.includes('(') ? pkt.callsign.split('(')[0].trim() : null);
+
+      let isBrandNewCasualty = false;
+
       setTriageRoster(prev => {
-        const existingIdx = prev.findIndex(v => v.uuid === pkt.uuid || v.id === pkt.id);
+        // Thorough deduplication: check ID, UUID, origin node, deviceId, or identical human victim name
+        const existingIdx = prev.findIndex(v => {
+          if (v.id && (v.id === victimId || v.id === pkt.id || v.id === pkt.uuid)) return true;
+          if (v.uuid && (v.uuid === packetUuid || v.uuid === pkt.uuid || v.uuid === pkt.id)) return true;
+          if (v.originNode && pkt.originNode && v.originNode === pkt.originNode) return true;
+          if (v.originNode && pkt.deviceId && v.originNode === pkt.deviceId) return true;
+          if (v.deviceId && pkt.deviceId && v.deviceId === pkt.deviceId) return true;
+          if (vName && (v.victimName === vName || (v.victimProfile?.name && v.victimProfile.name === vName))) return true;
+          if (v.callsign && pkt.callsign && v.callsign === pkt.callsign) return true;
+          return false;
+        });
+
+        isBrandNewCasualty = existingIdx < 0;
+
         const updatedVictim = {
-          id: pkt.id || pkt.uuid,
-          uuid: pkt.uuid || pkt.id,
-          victimName: pkt.victimName || (pkt.callsign && pkt.callsign.includes('(') ? pkt.callsign.split('(')[0].trim() : null),
-          callsign: pkt.callsign || 'VICTIM-UNKNOWN',
+          id: existingIdx >= 0 ? prev[existingIdx].id : victimId,
+          uuid: existingIdx >= 0 ? prev[existingIdx].uuid : packetUuid,
+          victimName: vName || (existingIdx >= 0 ? prev[existingIdx].victimName : null),
+          victimProfile: pkt.victimProfile || (existingIdx >= 0 ? prev[existingIdx].victimProfile : null),
+          callsign: pkt.callsign || (existingIdx >= 0 ? prev[existingIdx].callsign : 'VICTIM-UNKNOWN'),
           lat: coords.lat,
           lng: coords.lng,
           accuracy: typeof pkt.accuracy === 'number' && isFinite(pkt.accuracy) ? pkt.accuracy : 5,
           battery: typeof pkt.battery === 'number' && isFinite(pkt.battery) ? pkt.battery : 85,
-          status: pkt.status || 'TRAPPED',
-          voiceNote: pkt.voiceNote || null,
-          distressMessage: pkt.distressMessage || 'Critical Distress Signal Broadcast',
+          status: pkt.status || (existingIdx >= 0 ? prev[existingIdx].status : 'TRAPPED'),
+          voiceNote: pkt.voiceNote || (existingIdx >= 0 ? prev[existingIdx].voiceNote : null),
+          distressMessage: pkt.distressMessage || (existingIdx >= 0 ? prev[existingIdx].distressMessage : 'Critical Distress Signal Broadcast'),
           lastSeenMs: Date.now(),
           hopCount: pkt.hopCount || 1,
-          originNode: pkt.originNode || pkt.senderNode || 'UNKNOWN'
+          originNode: pkt.originNode || pkt.senderNode || (existingIdx >= 0 ? prev[existingIdx].originNode : 'UNKNOWN')
         };
 
         if (existingIdx >= 0) {
@@ -590,16 +672,17 @@ export default function App() {
         }
       });
 
-      // Show high priority alert overlay & sound siren if new critical casualty
-      if (isNewPacket && (pkt.status === 'TRAPPED' || pkt.status === 'CRITICAL')) {
+      // Show high priority alert overlay & sound siren ONLY for new critical casualty
+      if (isBrandNewCasualty && isNewPacket && (pkt.status === 'TRAPPED' || pkt.status === 'CRITICAL')) {
         setActiveAlertPopup({
           ...pkt,
+          victimName: vName,
           lat: coords.lat,
           lng: coords.lng,
           receivedAt: Date.now()
         });
         playEmergencySiren();
-        addLog('ALERT', `🚨 NEW CRITICAL CASUALTY: ${pkt.callsign || pkt.id} at [${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}]`);
+        addLog('ALERT', `🚨 NEW CRITICAL CASUALTY: ${vName || pkt.callsign || pkt.id} at [${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}]`);
       }
 
       // Store-and-forward to extend rescue mesh coverage
@@ -720,7 +803,14 @@ export default function App() {
       eventSource.addEventListener('INIT_SYNC', (e) => {
         try {
           const data = JSON.parse(e.data);
-          if (data.peers) {
+          if (data.peers && Array.isArray(data.peers)) {
+            const map = {};
+            data.peers.forEach(p => {
+              if (p && p.id && p.id !== myNodeId) {
+                map[p.id] = p;
+              }
+            });
+            setMeshPeersMap(map);
             connectToDiscoveredPeers(data.peers);
           }
           if (data.packets && Array.isArray(data.packets)) {
@@ -732,16 +822,28 @@ export default function App() {
       eventSource.addEventListener('PEERS_UPDATE', (e) => {
         try {
           const peers = JSON.parse(e.data);
-          connectToDiscoveredPeers(peers);
+          if (Array.isArray(peers)) {
+            const map = {};
+            peers.forEach(p => {
+              if (p && p.id && p.id !== myNodeId) {
+                map[p.id] = p;
+              }
+            });
+            setMeshPeersMap(map);
+            connectToDiscoveredPeers(peers);
+          }
         } catch (err) {}
       });
 
       eventSource.addEventListener('PEER_HEARTBEAT', (e) => {
         try {
           const p = JSON.parse(e.data);
-          if (p && p.id && p.id !== myNodeId && !activeConnectionsRef.current.has(p.id) && peerInstanceRef.current) {
-            const conn = peerInstanceRef.current.connect(p.id, { reliable: true });
-            registerConnection(conn);
+          if (p && p.id && p.id !== myNodeId) {
+            setMeshPeersMap(prev => ({ ...prev, [p.id]: p }));
+            if (!activeConnectionsRef.current.has(p.id) && peerInstanceRef.current) {
+              const conn = peerInstanceRef.current.connect(p.id, { reliable: true });
+              registerConnection(conn);
+            }
           }
         } catch (err) {}
       });
@@ -765,24 +867,30 @@ export default function App() {
       });
     } catch (e) {}
 
-    // Periodic Heartbeat
+    // Periodic Heartbeat using dynamic refs
     const sendHeartbeat = () => {
       try {
+        const curGps = latestGpsRef.current || DEFAULT_COORDS;
+        const curProfile = latestProfileRef.current;
+        const curDistress = latestDistressRef.current;
+        const curRole = latestRoleRef.current;
+        const curCallsign = latestCallsignRef.current;
+
         fetch('/api/mesh/heartbeat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             deviceId: myNodeId,
             shortId: myNodeId.substring(0, 8),
-            name: effectiveCallsign,
-            victimName: victimName.trim() || undefined,
-            role: activeRole === 'ROLE_VICTIM' ? 'VICTIM' : 'RESPONDER',
-            lat: gpsLocation.lat,
-            lng: gpsLocation.lng,
-            accuracy: gpsLocation.accuracy,
-            battery: batteryLevel,
-            status: isDistressActive ? distressStatus : 'SAFE',
-            isSosActive: isDistressActive
+            name: (curProfile?.name && curProfile.name.trim()) || curCallsign,
+            victimProfile: curProfile,
+            role: curRole === 'ROLE_VICTIM' ? 'VICTIM' : 'RESPONDER',
+            lat: curGps.lat,
+            lng: curGps.lng,
+            accuracy: curGps.accuracy,
+            battery: latestBatteryRef.current,
+            status: curDistress.isDistressActive ? curDistress.distressStatus : 'SAFE',
+            isSosActive: curDistress.isDistressActive
           })
         })
           .then(res => res.json())
@@ -791,10 +899,28 @@ export default function App() {
     };
 
     sendHeartbeat();
-    const heartbeatTimer = setInterval(sendHeartbeat, 5000);
+    const heartbeatTimer = setInterval(sendHeartbeat, 4000);
+
+    // Prune stale peers disconnected more than 45 seconds ago
+    const stalePruneTimer = setInterval(() => {
+      const cutoff = Date.now() - 45000;
+      setMeshPeersMap(prev => {
+        let changed = false;
+        const next = {};
+        for (const [id, p] of Object.entries(prev)) {
+          if (p.lastSeen && p.lastSeen > cutoff) {
+            next[id] = p;
+          } else {
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 10000);
 
     return () => {
       clearInterval(heartbeatTimer);
+      clearInterval(stalePruneTimer);
       if (eventSource) {
         eventSource.close();
       }
@@ -809,17 +935,35 @@ export default function App() {
     };
   }, [
     myNodeId,
-    activeRole,
-    effectiveCallsign,
-    victimName,
-    gpsLocation,
-    batteryLevel,
-    isDistressActive,
-    distressStatus,
     registerConnection,
     handleIncomingPacket,
     addLog
   ]);
+
+  // Telemetry ref synchronization
+  useEffect(() => {
+    latestGpsRef.current = gpsLocation;
+  }, [gpsLocation]);
+
+  useEffect(() => {
+    latestBatteryRef.current = batteryLevel;
+  }, [batteryLevel]);
+
+  useEffect(() => {
+    latestDistressRef.current = { isDistressActive, distressStatus };
+  }, [isDistressActive, distressStatus]);
+
+  useEffect(() => {
+    latestProfileRef.current = victimProfile;
+  }, [victimProfile]);
+
+  useEffect(() => {
+    latestRoleRef.current = activeRole;
+  }, [activeRole]);
+
+  useEffect(() => {
+    latestCallsignRef.current = effectiveCallsign;
+  }, [effectiveCallsign]);
 
   // ==========================================
   // 4. CONTINUOUS TELEMETRY TRANSMISSION (VICTIM)
@@ -833,7 +977,8 @@ export default function App() {
         uuid: `SOS_${myNodeId}_${Date.now()}`,
         id: myNodeId,
         callsign: effectiveCallsign,
-        victimName: victimName.trim() || undefined,
+        victimName: (victimProfile?.name && victimProfile.name.trim()) || victimName.trim() || undefined,
+        victimProfile: victimProfile,
         lat: gpsLocation.lat,
         lng: gpsLocation.lng,
         lon: gpsLocation.lng,
@@ -842,6 +987,7 @@ export default function App() {
         isCharging,
         status: distressStatus,
         distressMessage,
+        medical: victimProfile?.healthIssues ? `Blood: ${victimProfile?.bloodGroup || 'N/A'}, Medical: ${victimProfile?.healthIssues}` : '',
         voiceNote: voiceNoteRecorded,
         targetRole: 'RESPONDER_ONLY',
         timestamp: Date.now(),
@@ -857,6 +1003,7 @@ export default function App() {
     myNodeId,
     effectiveCallsign,
     victimName,
+    victimProfile,
     gpsLocation,
     batteryLevel,
     isCharging,
@@ -1558,16 +1705,22 @@ export default function App() {
     return triageRoster.filter(v => v.status === 'SAFE');
   }, [triageRoster]);
 
-  // Filtered active victims (ALL, CRITICAL, INJURED)
+  // Filtered active victims (ALL, CRITICAL, INJURED + Radius Distance Filter)
   const displayedActiveVictims = useMemo(() => {
+    let list = activeVictimsList;
     if (victimSubFilter === 'CRITICAL') {
-      return activeVictimsList.filter(v => v.status === 'TRAPPED' || v.status === 'CRITICAL');
+      list = list.filter(v => v.status === 'TRAPPED' || v.status === 'CRITICAL');
+    } else if (victimSubFilter === 'INJURED') {
+      list = list.filter(v => v.status === 'INJURED');
     }
-    if (victimSubFilter === 'INJURED') {
-      return activeVictimsList.filter(v => v.status === 'INJURED');
+    if (radiusFilterMeters > 0) {
+      list = list.filter(v => {
+        const d = calculateHaversine(gpsLocation.lat, gpsLocation.lng, v.lat, v.lng);
+        return d <= radiusFilterMeters;
+      });
     }
-    return activeVictimsList;
-  }, [activeVictimsList, victimSubFilter]);
+    return list;
+  }, [activeVictimsList, victimSubFilter, radiusFilterMeters, gpsLocation]);
 
   const triageCounts = useMemo(() => {
     const critical = triageRoster.filter(v => v.status === 'TRAPPED' || v.status === 'CRITICAL').length;
@@ -1726,7 +1879,7 @@ export default function App() {
         {/* ========================================================================= */}
         {activeRole === 'ROLE_VICTIM' && (
           <div className="flex-1 flex flex-col max-w-2xl mx-auto w-full space-y-6">
-            {/* CIVILIAN IDENTITY & PRIOR NAME REGISTRATION CARD */}
+            {/* CIVILIAN IDENTITY & EMERGENCY MEDICAL PROFILE CARD */}
             <div className="bg-[#0e1424] border border-slate-800/90 rounded-3xl p-5 shadow-xl space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
@@ -1735,17 +1888,17 @@ export default function App() {
                   </div>
                   <div>
                     <h3 className="text-sm font-black text-white">
-                      Civilian Identity Profile
+                      Civilian Identity &amp; Medical Triage Profile
                     </h3>
                     <p className="text-[11px] text-slate-400">
-                      Enter your name prior to emergency so search & rescue teams can identify you immediately.
+                      Transmitted in SOS mesh packet so rescue squads know your blood type and health needs immediately.
                     </p>
                   </div>
                 </div>
                 {victimName.trim() && (
                   <span className="bg-emerald-950/80 border border-emerald-700/80 text-emerald-300 text-[10px] font-mono font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
                     <UserCheck className="w-3 h-3" />
-                    <span>Registered</span>
+                    <span>Active</span>
                   </span>
                 )}
               </div>
@@ -1770,6 +1923,39 @@ export default function App() {
                     </button>
                   )}
                 </div>
+
+                <button
+                  id="btn-open-medical-profile"
+                  onClick={() => setIsProfileModalOpen(true)}
+                  className="bg-red-950/80 hover:bg-red-900/90 text-red-200 border border-red-700/80 px-3 py-2.5 rounded-xl text-xs font-bold font-mono transition flex items-center gap-1.5 shadow-sm shrink-0"
+                  title="Edit Emergency Medical Profile (Blood Group, Allergies, Emergency Contacts)"
+                >
+                  <Heart className="w-3.5 h-3.5 text-red-400" />
+                  <span>Medical Card</span>
+                  <Edit3 className="w-3 h-3 text-red-300 ml-0.5" />
+                </button>
+              </div>
+
+              {/* Medical summary snapshot */}
+              <div className="bg-[#070a14] border border-slate-800 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <div className="flex items-center gap-2">
+                  <span className="bg-red-600 text-white text-[10px] font-mono font-black px-2 py-0.5 rounded-md">
+                    Blood: {victimProfile?.bloodGroup || 'O+'}
+                  </span>
+                  {victimProfile?.healthIssues ? (
+                    <span className="text-amber-300 font-sans truncate max-w-[260px] sm:max-w-xs">
+                      ⚠️ {victimProfile.healthIssues}
+                    </span>
+                  ) : (
+                    <span className="text-slate-500 italic">No chronic medical conditions listed</span>
+                  )}
+                </div>
+
+                {victimProfile?.emergencyContact && (
+                  <span className="text-emerald-400 font-mono text-[10px]">
+                    📞 {victimProfile.emergencyContact}
+                  </span>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono pt-1 text-slate-400 border-t border-slate-800/80">
@@ -2437,33 +2623,58 @@ export default function App() {
                     </button>
                   </div>
 
-                  {/* Sub-Filters / Simulation Test Drill Trigger */}
-                  <div className="flex items-center gap-1.5">
+                  {/* Sub-Filters: Status & Radius Proximity + Drill Button */}
+                  <div className="flex flex-wrap items-center gap-1.5">
                     {rosterTab === 'VICTIMS' && (
-                      <div className="flex items-center bg-[#070a14] p-0.5 rounded-xl border border-slate-800 text-[10px] font-bold font-mono">
-                        {['ALL', 'CRITICAL', 'INJURED'].map(f => (
-                          <button
-                            key={f}
-                            onClick={() => setVictimSubFilter(f)}
-                            className={`px-2 py-0.5 rounded-lg transition ${
-                              victimSubFilter === f
-                                ? 'bg-indigo-600 text-white'
-                                : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            {f}
-                          </button>
-                        ))}
-                      </div>
+                      <>
+                        {/* Status Filter */}
+                        <div className="flex items-center bg-[#070a14] p-0.5 rounded-xl border border-slate-800 text-[10px] font-bold font-mono">
+                          {['ALL', 'CRITICAL', 'INJURED'].map(f => (
+                            <button
+                              key={f}
+                              onClick={() => setVictimSubFilter(f)}
+                              className={`px-2 py-0.5 rounded-lg transition ${
+                                victimSubFilter === f
+                                  ? 'bg-indigo-600 text-white'
+                                  : 'text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              {f}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* Proximity Radius Filter */}
+                        <div className="flex items-center bg-[#070a14] p-0.5 rounded-xl border border-slate-800 text-[10px] font-bold font-mono">
+                          {[
+                            { label: 'All Dist', val: 0 },
+                            { label: '<500m', val: 500 },
+                            { label: '<1km', val: 1000 },
+                            { label: '<2km', val: 2000 }
+                          ].map(r => (
+                            <button
+                              key={r.val}
+                              onClick={() => setRadiusFilterMeters(r.val)}
+                              className={`px-1.5 py-0.5 rounded-lg transition ${
+                                radiusFilterMeters === r.val
+                                  ? 'bg-cyan-600 text-white'
+                                  : 'text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              {r.label}
+                            </button>
+                          ))}
+                        </div>
+                      </>
                     )}
 
                     <button
                       id="btn-simulate-casualty"
                       onClick={simulateDrillVictim}
-                      className="bg-indigo-950/80 hover:bg-indigo-800 text-indigo-300 text-[10px] font-bold px-2.5 py-1 rounded-lg border border-indigo-700/80 font-mono transition flex items-center gap-1"
+                      className="bg-indigo-950/80 hover:bg-indigo-800 text-indigo-300 text-[10px] font-bold px-2 py-1 rounded-lg border border-indigo-700/80 font-mono transition flex items-center gap-1"
                       title="Inject simulated drill victim near your coordinates"
                     >
-                      <span>+ Drill Signal</span>
+                      <span>+ Drill</span>
                     </button>
                   </div>
                 </div>
@@ -2480,7 +2691,7 @@ export default function App() {
                           <span className="text-[11px] text-slate-500">
                             {rescuedList.length > 0
                               ? `All ${rescuedList.length} casualties are safe in the Rescued list.`
-                              : 'Click "+ Drill Signal" to simulate an emergency casualty.'}
+                              : 'Click "+ Drill" to simulate an emergency casualty.'}
                           </span>
                         </div>
                       ) : (
@@ -2488,6 +2699,7 @@ export default function App() {
                           const dist = calculateHaversine(gpsLocation.lat, gpsLocation.lng, v.lat, v.lng);
                           const isSelected = selectedVictim?.id === v.id || selectedVictim?.uuid === v.uuid;
                           const isHighlighted = locateHighlightId === (v.uuid || v.id);
+                          const profile = v.victimProfile;
 
                           return (
                             <div
@@ -2521,6 +2733,11 @@ export default function App() {
                                       <span className="text-[10px] bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded font-mono">
                                         {dist.toFixed(0)}m away
                                       </span>
+                                      {profile?.bloodGroup && (
+                                        <span className="bg-red-600 text-white text-[9px] font-mono font-black px-1.5 py-0.2 rounded">
+                                          Blood: {profile.bloodGroup}
+                                        </span>
+                                      )}
                                     </div>
                                     <span className="text-[10px] text-slate-400 font-mono">
                                       Node / Callsign: <strong className="text-amber-300/90">{v.callsign}</strong>
@@ -2543,6 +2760,23 @@ export default function App() {
                               <p className="text-xs text-slate-300 font-sans leading-relaxed">
                                 {v.distressMessage || 'Distress Telemetry Packet Stream Active'}
                               </p>
+
+                              {/* Emergency Medical Alerts & Triage Insights */}
+                              {(profile?.healthIssues || profile?.emergencyContact || v.medical) && (
+                                <div className="bg-[#0b0f1a] border border-slate-800/80 rounded-xl p-2 flex flex-wrap items-center justify-between gap-1.5 text-[10px]">
+                                  <div className="flex items-center gap-1.5 text-amber-300">
+                                    <Heart className="w-3 h-3 text-red-400 shrink-0" />
+                                    <span className="font-sans font-medium">
+                                      {profile?.healthIssues || v.medical}
+                                    </span>
+                                  </div>
+                                  {profile?.emergencyContact && (
+                                    <span className="text-emerald-400 font-mono">
+                                      Contact: {profile.emergencyContact}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
 
                               {/* Telemetry & Action Buttons */}
                               <div className="flex flex-wrap items-center justify-between pt-2 border-t border-slate-800/60 text-[11px] font-mono gap-2">
@@ -2767,6 +3001,23 @@ export default function App() {
                 <span className="text-slate-400">Battery Level:</span>
                 <strong className="text-amber-400">{activeAlertPopup.battery}%</strong>
               </div>
+              {(activeAlertPopup.victimProfile?.bloodGroup || activeAlertPopup.victimProfile?.healthIssues || activeAlertPopup.medical) && (
+                <div className="pt-1 border-t border-red-950/80 mt-1 space-y-0.5">
+                  {activeAlertPopup.victimProfile?.bloodGroup && (
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-red-300">Blood Type:</span>
+                      <strong className="text-white bg-red-600 px-1.5 py-0.2 rounded font-mono">
+                        {activeAlertPopup.victimProfile.bloodGroup}
+                      </strong>
+                    </div>
+                  )}
+                  {(activeAlertPopup.victimProfile?.healthIssues || activeAlertPopup.medical) && (
+                    <p className="text-amber-300 text-[11px] font-sans">
+                      ⚠️ Medical: {activeAlertPopup.victimProfile?.healthIssues || activeAlertPopup.medical}
+                    </p>
+                  )}
+                </div>
+              )}
               <p className="text-slate-300 font-sans text-xs pt-1 border-t border-red-950 mt-1">
                 "{activeAlertPopup.distressMessage}"
               </p>
@@ -2795,6 +3046,16 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ========================================================================= */}
+      {/* 5. EMERGENCY CIVILIAN MEDICAL PROFILE MODAL DIALOG                        */}
+      {/* ========================================================================= */}
+      <EmergencyProfileModal
+        isOpen={isProfileModalOpen}
+        onClose={() => setIsProfileModalOpen(false)}
+        currentProfile={victimProfile}
+        onSave={handleSaveVictimProfile}
+      />
     </div>
   );
 }
