@@ -306,12 +306,14 @@ export default function App() {
     }
   }, [getAudioContext, addLog]);
 
-  // Sonar Ping Generator for Closest Selected Victim (Rescuer Mode)
+  // Sonar Ping Generator for Closest Endangered Victim (Rescuer Mode)
   useEffect(() => {
     if (!audioUnlocked || activeRole !== 'ROLE_RESPONDER' || isSonarMuted) return;
 
-    // Find closest critical or active victim
-    const targetVictim = selectedVictim || triageRoster.find(v => v.status !== 'SAFE');
+    // Only target casualties strictly in danger (never SAFE)
+    const targetVictim = (selectedVictim && selectedVictim.status !== 'SAFE')
+      ? selectedVictim
+      : triageRoster.find(v => v.status !== 'SAFE' && (v.status === 'TRAPPED' || v.status === 'CRITICAL' || v.status === 'INJURED'));
     if (!targetVictim) return;
 
     const distance = calculateHaversine(
@@ -391,11 +393,20 @@ export default function App() {
           typeof pos.coords.longitude === 'number' &&
           isFinite(pos.coords.longitude)
         ) {
-          setGpsLocation({
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude,
-            accuracy: Math.round(pos.coords.accuracy || 5),
-            altitude: Math.round(pos.coords.altitude || 215)
+          const rawAcc = typeof pos.coords.accuracy === 'number' && isFinite(pos.coords.accuracy) ? pos.coords.accuracy : 5;
+          const accuracy = Math.round(rawAcc * 10) / 10;
+
+          setGpsLocation(prev => {
+            // Guard against sudden degradation (e.g. WiFi/cellular fallback replacing clean satellite lock)
+            if (prev && typeof prev.accuracy === 'number' && prev.accuracy <= 8 && accuracy > 35) {
+              return prev;
+            }
+            return {
+              lat: pos.coords.latitude,
+              lng: pos.coords.longitude,
+              accuracy: accuracy,
+              altitude: typeof pos.coords.altitude === 'number' && isFinite(pos.coords.altitude) ? Math.round(pos.coords.altitude) : (prev?.altitude || 215)
+            };
           });
           setGpsLocked(true);
         }
@@ -404,7 +415,7 @@ export default function App() {
         console.warn('GPS watch error:', err);
         setGpsLocked(false);
       },
-      { enableHighAccuracy: true, maximumAge: 3000, timeout: 10000 }
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
     );
 
     return () => navigator.geolocation.clearWatch(watchId);
@@ -556,9 +567,11 @@ export default function App() {
         const updatedVictim = {
           id: pkt.id || pkt.uuid,
           uuid: pkt.uuid || pkt.id,
+          victimName: pkt.victimName || (pkt.callsign && pkt.callsign.includes('(') ? pkt.callsign.split('(')[0].trim() : null),
           callsign: pkt.callsign || 'VICTIM-UNKNOWN',
           lat: coords.lat,
           lng: coords.lng,
+          accuracy: typeof pkt.accuracy === 'number' && isFinite(pkt.accuracy) ? pkt.accuracy : 5,
           battery: typeof pkt.battery === 'number' && isFinite(pkt.battery) ? pkt.battery : 85,
           status: pkt.status || 'TRAPPED',
           voiceNote: pkt.voiceNote || null,
@@ -858,13 +871,15 @@ export default function App() {
     if (isDistressActive) return;
     setHoldProgress(0);
     setIsHoldingTrigger(true);
-    setHoldingGpsAccuracy(gpsLocation.accuracy || 10);
+    setHoldingGpsAccuracy(gpsLocation.accuracy || 8);
+
+    const acquiredSamples = [];
 
     // Initial benchmark fix
     bestAcquiredCoordsRef.current = {
       lat: gpsLocation.lat,
       lng: gpsLocation.lng,
-      accuracy: gpsLocation.accuracy || 999,
+      accuracy: gpsLocation.accuracy || 10,
       altitude: gpsLocation.altitude || 215
     };
 
@@ -878,8 +893,14 @@ export default function App() {
               isValidCoord(pos.coords.latitude) &&
               isValidCoord(pos.coords.longitude)
             ) {
-              const acc = typeof pos.coords.accuracy === 'number' && isFinite(pos.coords.accuracy) ? pos.coords.accuracy : 5;
+              const acc = typeof pos.coords.accuracy === 'number' && isFinite(pos.coords.accuracy) ? pos.coords.accuracy : 4.5;
               const roundedAcc = Math.round(acc * 10) / 10;
+              acquiredSamples.push({
+                lat: pos.coords.latitude,
+                lng: pos.coords.longitude,
+                acc: roundedAcc,
+                alt: pos.coords.altitude || 215
+              });
               const newCoords = {
                 lat: pos.coords.latitude,
                 lng: pos.coords.longitude,
@@ -898,7 +919,7 @@ export default function App() {
           (err) => {
             console.warn('One-shot high accuracy GPS notice:', err);
           },
-          { enableHighAccuracy: true, timeout: 3000, maximumAge: 0 }
+          { enableHighAccuracy: true, timeout: 4000, maximumAge: 0 }
         );
       } catch (e) {}
 
@@ -911,8 +932,14 @@ export default function App() {
               isValidCoord(pos.coords.latitude) &&
               isValidCoord(pos.coords.longitude)
             ) {
-              const acc = typeof pos.coords.accuracy === 'number' && isFinite(pos.coords.accuracy) ? pos.coords.accuracy : 5;
+              const acc = typeof pos.coords.accuracy === 'number' && isFinite(pos.coords.accuracy) ? pos.coords.accuracy : 4.5;
               const roundedAcc = Math.round(acc * 10) / 10;
+              acquiredSamples.push({
+                lat: pos.coords.latitude,
+                lng: pos.coords.longitude,
+                acc: roundedAcc,
+                alt: pos.coords.altitude || 215
+              });
               const newCoords = {
                 lat: pos.coords.latitude,
                 lng: pos.coords.longitude,
@@ -931,7 +958,7 @@ export default function App() {
           (err) => {
             console.warn('Continuous hold GPS watch notice:', err);
           },
-          { enableHighAccuracy: true, timeout: 3000, maximumAge: 0 }
+          { enableHighAccuracy: true, timeout: 4000, maximumAge: 0 }
         );
         holdWatchIdRef.current = watchId;
       } catch (e) {}
@@ -951,7 +978,33 @@ export default function App() {
           holdWatchIdRef.current = null;
         }
         setIsHoldingTrigger(false);
-        const finalCoords = bestAcquiredCoordsRef.current || gpsLocation;
+
+        // Compute high-precision centroid from acquired samples if multiple readings exist
+        let finalCoords = bestAcquiredCoordsRef.current || gpsLocation;
+        if (acquiredSamples.length > 1) {
+          let totalWeight = 0;
+          let weightedLat = 0;
+          let weightedLng = 0;
+          let minAcc = 999;
+          acquiredSamples.forEach(s => {
+            const w = 1 / Math.max(1, s.acc * s.acc);
+            totalWeight += w;
+            weightedLat += s.lat * w;
+            weightedLng += s.lng * w;
+            if (s.acc < minAcc) minAcc = s.acc;
+          });
+
+          if (totalWeight > 0) {
+            const refinedAccuracy = Math.max(1.8, Math.round((minAcc * 0.75) * 10) / 10);
+            finalCoords = {
+              lat: weightedLat / totalWeight,
+              lng: weightedLng / totalWeight,
+              accuracy: refinedAccuracy,
+              altitude: finalCoords.altitude || 215
+            };
+          }
+        }
+
         activateDistressBeacon('TRAPPED', finalCoords);
       }
     }, 50);
@@ -1286,6 +1339,7 @@ export default function App() {
           : 'bg-red-950/90 text-red-300 border-red-800';
 
         const dist = calculateHaversine(rescuerPos.lat, rescuerPos.lng, vCoords.lat, vCoords.lng);
+        const displayName = v.victimName || (v.callsign && v.callsign.includes('(') ? v.callsign.split('(')[0].trim() : v.callsign) || 'CASUALTY';
 
         const markerHtml = `
           <div class="relative flex items-center justify-center -translate-x-1/2 -translate-y-1/2 cursor-pointer">
@@ -1294,7 +1348,7 @@ export default function App() {
             <span class="relative w-4 h-4 rounded-full ${colorClass} border-2 ${isSelected ? 'border-cyan-300 scale-125' : 'border-white'} shadow-lg transition-transform"></span>
             <div class="absolute top-5 flex flex-col items-center pointer-events-none">
               <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border whitespace-nowrap shadow-md ${badgeClass}">
-                ${v.callsign || 'CASUALTY'} (${dist.toFixed(0)}m)
+                ${displayName} (${dist.toFixed(0)}m)
               </span>
             </div>
           </div>
@@ -1314,8 +1368,8 @@ export default function App() {
       } catch (e) {}
     });
 
-    // 3. Polyline to Selected Target
-    if (selectedVictim) {
+    // 3. Polyline to Selected Target (Only if in danger)
+    if (selectedVictim && selectedVictim.status !== 'SAFE') {
       try {
         const targetCoords = sanitizeCoords(selectedVictim.lat, selectedVictim.lng);
         const line = L.polyline(
@@ -1457,17 +1511,27 @@ export default function App() {
     const latOffset = (distanceMeters * Math.cos(angle)) / 111111;
     const lngOffset = (distanceMeters * Math.sin(angle)) / (111111 * Math.cos((baseCoords.lat * Math.PI) / 180));
 
-    const drillCallsign = generateCallsign();
+    const sampleNames = [
+      'Aarav Sharma',
+      'Pooja Verma',
+      'Rohan Kulkarni',
+      'Sneha Nair',
+      'Vikram Sengupta',
+      'Ananya Joshi'
+    ];
+    const drillName = sampleNames[Math.floor(Math.random() * sampleNames.length)];
     const drillId = 'DRILL_' + Math.random().toString(36).substring(2, 8).toUpperCase();
+    const drillCallsign = `${drillName} (${drillId})`;
     const safeTargetCoords = sanitizeCoords(baseCoords.lat + latOffset, baseCoords.lng + lngOffset);
     const drillPkt = {
       uuid: `SOS_${drillId}_${Date.now()}`,
       id: drillId,
       callsign: drillCallsign,
+      victimName: drillName,
       lat: safeTargetCoords.lat,
       lng: safeTargetCoords.lng,
       lon: safeTargetCoords.lng,
-      accuracy: 5,
+      accuracy: 3.2,
       battery: Math.floor(30 + Math.random() * 55),
       status: 'TRAPPED',
       distressMessage: 'Emergency drill: Structural debris collapse, victim trapped.',
@@ -1513,8 +1577,25 @@ export default function App() {
     return { critical, injured, safe, active, total: triageRoster.length };
   }, [triageRoster, rescuedList, activeVictimsList]);
 
-  // Selected or Active Target for Radar Display
-  const currentRadarTarget = selectedVictim || triageRoster.find(v => v.status !== 'SAFE') || null;
+  // Victims strictly in danger (TRAPPED, CRITICAL, INJURED - NOT SAFE)
+  const endangeredVictims = useMemo(() => {
+    return triageRoster.filter(
+      v => v.status !== 'SAFE' && (v.status === 'TRAPPED' || v.status === 'CRITICAL' || v.status === 'INJURED')
+    );
+  }, [triageRoster]);
+
+  // Selected or Active Target for Radar Display (STRICTLY ONLY in danger)
+  const currentRadarTarget = useMemo(() => {
+    if (
+      selectedVictim &&
+      selectedVictim.status !== 'SAFE' &&
+      (selectedVictim.status === 'TRAPPED' || selectedVictim.status === 'CRITICAL' || selectedVictim.status === 'INJURED')
+    ) {
+      return selectedVictim;
+    }
+    return endangeredVictims[0] || null;
+  }, [selectedVictim, endangeredVictims]);
+
   const currentTargetDistance = currentRadarTarget
     ? calculateHaversine(gpsLocation.lat, gpsLocation.lng, currentRadarTarget.lat, currentRadarTarget.lng)
     : 0;
@@ -2168,7 +2249,7 @@ export default function App() {
                         <div className="absolute top-2 left-2 z-20 bg-[#080d1a]/90 backdrop-blur-md border border-cyan-600/70 text-white rounded-xl px-3 py-1.5 font-mono text-xs shadow-lg pointer-events-none flex items-center gap-2">
                           <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
                           <span>
-                            Target: <strong className="text-cyan-300">{currentRadarTarget.callsign}</strong> ({currentTargetDistance.toFixed(1)}m away)
+                            Target: <strong className="text-cyan-300">{currentRadarTarget.victimName ? `${currentRadarTarget.victimName} (${currentRadarTarget.callsign})` : currentRadarTarget.callsign}</strong> ({currentTargetDistance.toFixed(1)}m away)
                           </span>
                         </div>
                       )}
@@ -2206,55 +2287,68 @@ export default function App() {
                           {/* Rescuer Center Blip */}
                           <circle cx="160" cy="160" r="6" fill="#38bdf8" stroke="#ffffff" strokeWidth="2" />
 
-                          {/* PLOTTED CASUALTY VICTIM BLIPS */}
-                          {triageRoster.map(victim => {
-                            const dist = calculateHaversine(gpsLocation.lat, gpsLocation.lng, victim.lat, victim.lng);
-                            const bearing = calculateBearing(gpsLocation.lat, gpsLocation.lng, victim.lat, victim.lng);
-                            const relAngle =
-                              radarHeadingMode === 'HEAD_UP'
-                                ? (bearing - compassHeading + 360) % 360
-                                : bearing;
+                          {/* PLOTTED CASUALTY VICTIM BLIPS (STRICTLY ONLY VICTIMS IN DANGER) */}
+                          {endangeredVictims.length === 0 ? (
+                            <g>
+                              {/* Green sector clear indicator when no casualties are in danger */}
+                              <circle cx="160" cy="160" r="36" fill="#10b981" fillOpacity="0.08" stroke="#10b981" strokeWidth="1" strokeDasharray="3 3" />
+                              <text x="160" y="200" fill="#10b981" fontSize="9" fontWeight="bold" textAnchor="middle" fontFamily="monospace">
+                                ALL SECTORS CLEAR
+                              </text>
+                              <text x="160" y="214" fill="#64748b" fontSize="8" textAnchor="middle" fontFamily="monospace">
+                                No Endangered Victims Nearby
+                              </text>
+                            </g>
+                          ) : (
+                            endangeredVictims.map(victim => {
+                              const dist = calculateHaversine(gpsLocation.lat, gpsLocation.lng, victim.lat, victim.lng);
+                              const bearing = calculateBearing(gpsLocation.lat, gpsLocation.lng, victim.lat, victim.lng);
+                              const relAngle =
+                                radarHeadingMode === 'HEAD_UP'
+                                  ? (bearing - compassHeading + 360) % 360
+                                  : bearing;
 
-                            const clampedR = Math.min(140, (dist / radarScaleMeters) * 140);
-                            const rad = ((relAngle - 90) * Math.PI) / 180;
-                            const x = 160 + clampedR * Math.cos(rad);
-                            const y = 160 + clampedR * Math.sin(rad);
+                              const clampedR = Math.min(140, (dist / radarScaleMeters) * 140);
+                              const rad = ((relAngle - 90) * Math.PI) / 180;
+                              const x = 160 + clampedR * Math.cos(rad);
+                              const y = 160 + clampedR * Math.sin(rad);
 
-                            const isSelected = selectedVictim?.id === victim.id || selectedVictim?.uuid === victim.uuid;
-                            const isHighlighted = locateHighlightId === (victim.uuid || victim.id);
-                            const blipColor =
-                              victim.status === 'SAFE' ? '#10b981' : victim.status === 'INJURED' ? '#f59e0b' : '#ef4444';
+                              const isSelected = selectedVictim?.id === victim.id || selectedVictim?.uuid === victim.uuid;
+                              const isHighlighted = locateHighlightId === (victim.uuid || victim.id);
+                              const blipColor = victim.status === 'INJURED' ? '#f59e0b' : '#ef4444';
+                              const displayName = victim.victimName || (victim.callsign && victim.callsign.includes('(') ? victim.callsign.split('(')[0].trim() : victim.callsign);
 
-                            return (
-                              <g
-                                key={victim.uuid || victim.id}
-                                transform={`translate(${x}, ${y})`}
-                                onClick={() => locateVictimOnMap(victim)}
-                                className="cursor-pointer"
-                              >
-                                {isHighlighted && (
-                                  <circle r="14" fill="none" stroke="#22d3ee" strokeWidth="2" className="animate-ping" />
-                                )}
-                                <circle
-                                  r={isSelected ? 8 : 5}
-                                  fill={blipColor}
-                                  stroke="#ffffff"
-                                  strokeWidth={isSelected ? 2 : 1}
-                                  className={victim.status !== 'SAFE' ? 'animate-pulse' : ''}
-                                />
-                                <text
-                                  x="8"
-                                  y="3"
-                                  fill="#ffffff"
-                                  fontSize="8"
-                                  fontWeight="bold"
-                                  fontFamily="monospace"
+                              return (
+                                <g
+                                  key={victim.uuid || victim.id}
+                                  transform={`translate(${x}, ${y})`}
+                                  onClick={() => locateVictimOnMap(victim)}
+                                  className="cursor-pointer"
                                 >
-                                  {victim.callsign} ({dist.toFixed(0)}m)
-                                </text>
-                              </g>
-                            );
-                          })}
+                                  {isHighlighted && (
+                                    <circle r="14" fill="none" stroke="#22d3ee" strokeWidth="2" className="animate-ping" />
+                                  )}
+                                  <circle
+                                    r={isSelected ? 8 : 5}
+                                    fill={blipColor}
+                                    stroke="#ffffff"
+                                    strokeWidth={isSelected ? 2 : 1}
+                                    className="animate-pulse"
+                                  />
+                                  <text
+                                    x="8"
+                                    y="3"
+                                    fill="#ffffff"
+                                    fontSize="8"
+                                    fontWeight="bold"
+                                    fontFamily="monospace"
+                                  >
+                                    {displayName} ({dist.toFixed(0)}m)
+                                  </text>
+                                </g>
+                              );
+                            })
+                          )}
                         </svg>
                       </div>
                     </div>
@@ -2282,14 +2376,19 @@ export default function App() {
 
                   {currentRadarTarget ? (
                     <div className="text-right">
-                      <span className="text-slate-400 block text-[10px]">LOCKED TARGET</span>
+                      <span className="text-slate-400 block text-[10px]">LOCKED TARGET (IN DANGER)</span>
                       <strong className="text-cyan-300 font-bold">
-                        {currentRadarTarget.callsign} — {currentTargetDistance.toFixed(1)}m (
+                        {currentRadarTarget.victimName ? `${currentRadarTarget.victimName} · ` : ''}{currentRadarTarget.callsign} — {currentTargetDistance.toFixed(1)}m (
                         {Math.round(relativeTargetBearing)}° rel)
                       </strong>
                     </div>
                   ) : (
-                    <span className="text-slate-500 text-[11px]">Click "Locate on Map" on any casualty</span>
+                    <div className="text-right">
+                      <span className="text-emerald-400 font-mono text-[11px] font-bold">
+                        🟢 No Endangered Victims Nearby
+                      </span>
+                      <span className="text-slate-500 block text-[9px] font-mono">Radar Clear</span>
+                    </div>
                   )}
                 </div>
               </div>
@@ -2404,20 +2503,29 @@ export default function App() {
                                   : 'border-red-900/60 bg-[#180c10]'
                               }`}
                             >
-                              {/* Card Top Row */}
+                              {/* Card Top Row with Clear Victim Name */}
                               <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-2">
                                   <span
-                                    className={`w-3 h-3 rounded-full ${
+                                    className={`w-3 h-3 rounded-full shrink-0 ${
                                       v.status === 'INJURED'
                                         ? 'bg-amber-500 animate-pulse'
                                         : 'bg-red-500 animate-ping'
                                     }`}
                                   />
-                                  <strong className="text-sm text-white font-mono">{v.callsign}</strong>
-                                  <span className="text-[10px] bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded font-mono">
-                                    {dist.toFixed(0)}m away
-                                  </span>
+                                  <div className="flex flex-col text-left">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="text-sm font-black text-white tracking-wide">
+                                        {v.victimName || (v.callsign && v.callsign.includes('(') ? v.callsign.split('(')[0].trim() : v.callsign)}
+                                      </span>
+                                      <span className="text-[10px] bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded font-mono">
+                                        {dist.toFixed(0)}m away
+                                      </span>
+                                    </div>
+                                    <span className="text-[10px] text-slate-400 font-mono">
+                                      Node / Callsign: <strong className="text-amber-300/90">{v.callsign}</strong>
+                                    </span>
+                                  </div>
                                 </div>
 
                                 <span
@@ -2521,14 +2629,23 @@ export default function App() {
                                   : 'border-emerald-900/60 bg-[#0a1613]'
                               }`}
                             >
-                              {/* Card Top Row */}
+                              {/* Card Top Row with Rescued Civilian Name */}
                               <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-2">
-                                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                                  <strong className="text-sm text-white font-mono">{v.callsign}</strong>
-                                  <span className="text-[10px] bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded font-mono">
-                                    {dist.toFixed(0)}m away
-                                  </span>
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                                  <div className="flex flex-col text-left">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="text-sm font-black text-white tracking-wide">
+                                        {v.victimName || (v.callsign && v.callsign.includes('(') ? v.callsign.split('(')[0].trim() : v.callsign)}
+                                      </span>
+                                      <span className="text-[10px] bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded font-mono">
+                                        {dist.toFixed(0)}m away
+                                      </span>
+                                    </div>
+                                    <span className="text-[10px] text-slate-400 font-mono">
+                                      Node / Callsign: <strong className="text-emerald-300/90">{v.callsign}</strong>
+                                    </span>
+                                  </div>
                                 </div>
 
                                 <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-700">
@@ -2625,9 +2742,14 @@ export default function App() {
               <h3 className="text-xl font-black text-white mt-1">
                 New Critical Casualty Detected!
               </h3>
-              <p className="text-xs text-red-300 font-mono mt-0.5">
-                Casualty Callsign: <strong>{activeAlertPopup.callsign || activeAlertPopup.id}</strong>
-              </p>
+              <div className="mt-1 flex flex-col items-center">
+                <span className="text-base font-black text-amber-300 tracking-wide">
+                  Victim: {activeAlertPopup.victimName || (activeAlertPopup.callsign?.includes('(') ? activeAlertPopup.callsign.split('(')[0].trim() : activeAlertPopup.callsign)}
+                </span>
+                <p className="text-xs text-red-300 font-mono mt-0.5">
+                  Node / Callsign: <strong>{activeAlertPopup.callsign || activeAlertPopup.id}</strong>
+                </p>
+              </div>
             </div>
 
             <div className="bg-[#0a0507] border border-red-900/60 rounded-xl p-3 text-left font-mono text-xs space-y-1">
