@@ -110,7 +110,7 @@ export default function ResponderMode({
         setRescuerOffset(prev => {
           const hyp = Math.sqrt(prev.dLat * prev.dLat + prev.dLng * prev.dLng);
           if (hyp <= 0.000015) { // within ~1.5m
-            setIsAutoWalking(false);
+            setTimeout(() => setIsAutoWalking(false), 0);
             return prev;
           }
           const stepRatio = 0.000012 / hyp; // ~1.3 meters per tick
@@ -124,7 +124,7 @@ export default function ResponderMode({
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [isAutoWalking]);
+  }, [isAutoWalking, setRescuerOffset]);
 
   // Live calculation variables for Node A (Victim) & Node B (Rescuer)
   const victimLat = Number(manualCoords.lat) || gpsState.lat || 19.0760;
@@ -323,7 +323,7 @@ export default function ResponderMode({
             <AlertTriangle className="w-4 h-4 text-red-500 animate-pulse" />
           </div>
           <div className="text-2xl sm:text-3xl font-black text-white mt-1">
-            {victimAggregator.trappedCount + victimAggregator.criticalCount}
+            {(victimAggregator?.trappedCount || 0) + (victimAggregator?.criticalCount || 0)}
           </div>
           <span className="text-[11px] text-red-300 font-medium">Immediate Extraction</span>
         </div>
@@ -335,7 +335,7 @@ export default function ResponderMode({
             <Activity className="w-4 h-4 text-amber-500" />
           </div>
           <div className="text-2xl sm:text-3xl font-black text-white mt-1">
-            {victimAggregator.injuredCount}
+            {victimAggregator?.injuredCount || 0}
           </div>
           <span className="text-[11px] text-amber-300 font-medium">Medical Aid Required</span>
         </div>
@@ -347,7 +347,7 @@ export default function ResponderMode({
             <UserCheck className="w-4 h-4 text-emerald-500" />
           </div>
           <div className="text-2xl sm:text-3xl font-black text-white mt-1">
-            {victimAggregator.safeCount}
+            {victimAggregator?.safeCount || 0}
           </div>
           <span className="text-[11px] text-emerald-300 font-medium">Sheltered / Evacuated</span>
         </div>
@@ -838,7 +838,7 @@ export default function ResponderMode({
               })}
 
               {/* Secondary Multi-Victim Casualty Blips (if any exist in incident command) */}
-              {victimAggregator?.victimsList?.filter(v => v.uuid !== nodes.nodeA.uuid).map((v) => {
+              {(victimAggregator?.victims || victimAggregator?.victimsList || []).filter(v => v && v.uuid !== nodes?.nodeA?.uuid).map((v) => {
                 const vDist = calculateHaversine(rescuerLat, rescuerLng, v.lat, v.lng);
                 const vBearing = calculateBearing(rescuerLat, rescuerLng, v.lat, v.lng);
                 const vRelBearing = isOrientationActive ? (vBearing - effectiveHeading + 360) % 360 : vBearing;
@@ -1126,8 +1126,9 @@ export default function ResponderMode({
 
         {/* Victims list */}
         <div className="space-y-3">
-          {victimAggregator.victimsList
+          {(victimAggregator?.victims || victimAggregator?.victimsList || [])
             .filter(v => {
+              if (!v) return false;
               if (rosterFilter === 'CRITICAL') return v.status === 'TRAPPED' || v.isCritical;
               if (rosterFilter === 'INJURED') return v.status === 'INJURED';
               if (rosterFilter === 'SAFE') return v.status === 'SAFE';

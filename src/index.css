@@ -1,1 +1,21 @@
 @import "tailwindcss";
+
+/* Tactical Map dark mode filter for OpenStreetMap tiles (100% free, zero API keys required) */
+.tactical-tiles {
+  filter: invert(100%) hue-rotate(180deg) brightness(88%) contrast(92%);
+}
+
+.leaflet-container {
+  background-color: #070a12 !important;
+  font-family: inherit;
+}
+
+.leaflet-control-attribution {
+  background: rgba(11, 16, 28, 0.75) !important;
+  color: #64748b !important;
+  font-size: 9px !important;
+}
+
+.leaflet-control-attribution a {
+  color: #38bdf8 !important;
+}

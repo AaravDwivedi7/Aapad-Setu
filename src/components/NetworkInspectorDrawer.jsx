@@ -50,7 +50,7 @@ export default function NetworkInspectorDrawer({
 
   if (!isOpen) return null;
 
-  const filteredLogs = logs.filter(l => logFilter === 'ALL' || l.type === logFilter);
+  const filteredLogs = (logs || []).filter(l => l && (logFilter === 'ALL' || l.type === logFilter));
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">

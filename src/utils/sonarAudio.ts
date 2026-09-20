@@ -190,6 +190,16 @@ export class SonarAudioEngine {
     }
   }
 
+  public destroy() {
+    this.stop();
+    if (this.audioCtx && this.audioCtx.state !== 'closed') {
+      try {
+        this.audioCtx.close().catch(() => {});
+      } catch (e) {}
+      this.audioCtx = null;
+    }
+  }
+
   public getStatus(): SonarFeedbackState {
     return {
       isPlaying: this.isRunning && !this.isMuted,

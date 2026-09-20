@@ -66,15 +66,29 @@ export class PeerJSMeshManager {
   private heartbeatTimer: any = null;
 
   constructor(
-    room: string = 'AAPAD_SETU_MESH_ZONE_1',
+    roomOrOptions: string | { room?: string; onPacket?: (packet: DisasterPacket, senderId: string) => void; onPeerCount?: (count: number) => void; onPeers?: (peers: string[]) => void; onPeerId?: (id: string) => void; onLog?: (tag: string, msg: string) => void } = 'AAPAD_SETU_MESH_ZONE_1',
     onPacket?: (packet: DisasterPacket, senderId: string) => void,
     onPeers?: (peers: string[]) => void,
     onLog?: (tag: string, msg: string) => void
   ) {
-    this.roomName = room;
-    if (onPacket) this.onPacketReceived = onPacket;
-    if (onPeers) this.onPeersChange = onPeers;
-    if (onLog) this.onLog = onLog;
+    if (typeof roomOrOptions === 'object' && roomOrOptions !== null) {
+      this.roomName = roomOrOptions.room || 'AAPAD_SETU_MESH_ZONE_1';
+      if (roomOrOptions.onPacket) this.onPacketReceived = roomOrOptions.onPacket;
+      if (roomOrOptions.onPeers) this.onPeersChange = roomOrOptions.onPeers;
+      if (roomOrOptions.onPeerCount) {
+        const origPeers = this.onPeersChange;
+        this.onPeersChange = (peers) => {
+          if (origPeers) origPeers(peers);
+          roomOrOptions.onPeerCount!(peers.length);
+        };
+      }
+      if (roomOrOptions.onLog) this.onLog = roomOrOptions.onLog;
+    } else {
+      this.roomName = roomOrOptions;
+      if (onPacket) this.onPacketReceived = onPacket;
+      if (onPeers) this.onPeersChange = onPeers;
+      if (onLog) this.onLog = onLog;
+    }
   }
 
   private log(tag: string, msg: string) {
@@ -93,12 +107,17 @@ export class PeerJSMeshManager {
         return;
       }
 
-      this.peer = new PeerClass(assignedId, {
+      this.peer = new PeerClass(`aapad-setu-${Math.random().toString(36).substr(2, 6)}`, {
+        host: '0.peerjs.com',
+        port: 443,
+        path: '/',
+        secure: true,
         debug: 1,
         config: {
           iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' }
           ]
         }
       });
