@@ -17,9 +17,9 @@ When both cellular networks and internet connectivity are unavailable, victims a
 
 ---
 
-## 2. The RESQ Solution
+## 2. The Aapad-Setu Solution
 
-**RESQ** operates completely offline using opportunistic peer-to-peer communication:
+**Aapad-Setu** operates completely offline using opportunistic peer-to-peer communication:
 
 ```
 [VICTIM PHONE A] (Offline) 
@@ -65,7 +65,7 @@ Each SOS broadcast is serialized as a lightweight, compact JSON packet:
 
 ```json
 {
-  "packetId": "resq-a842-1710892800",
+  "packetId": "Aapad-Setu-a842-1710892800",
   "type": "SOS",
   "senderId": "R-1842",
   "createdAt": "14:22:10.4",
@@ -112,7 +112,7 @@ Packets are sorted by priority before transmission over bandwidth-constrained pe
 
 ## 6. Scientific Honesty & Real-World Physics
 
-- **RSSI Inaccuracy:** Received Signal Strength Indicator (RSSI) cannot determine exact geometric distance in collapsed structures due to multipath reflections, wall attenuation, and antenna orientation. RESQ groups signals into discrete proximity confidence bands.
+- **RSSI Inaccuracy:** Received Signal Strength Indicator (RSSI) cannot determine exact geometric distance in collapsed structures due to multipath reflections, wall attenuation, and antenna orientation. Aapad-Setu groups signals into discrete proximity confidence bands.
 - **Satellite GPS Attenuation:** GPS satellite signals may degrade under heavy concrete rubble. The application transmits the last high-accuracy fix obtained prior to structural entry.
 - **Physical Mesh Range:** Direct BLE ranges span 10–30 meters; multi-hop opportunistic forwarding bridges kilometer-scale gaps through physical mobility.
 
