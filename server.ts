@@ -49,6 +49,14 @@ interface SosPacket {
   hops: number;
   ttl: number;
   timestamp: string;
+  isLastGaspPacket?: boolean;
+  lastKnownLocation?: {
+    lat: number;
+    lng: number;
+    accuracy?: number;
+    altitude?: number;
+    lockedAt?: number;
+  };
   payload?: {
     msg: string;
     level: string;
@@ -207,6 +215,14 @@ async function startServer() {
       hops: Number(packet.hops) || 0,
       ttl: Number(packet.ttl) || 5,
       timestamp: packet.timestamp || new Date().toISOString(),
+      isLastGaspPacket: Boolean(packet.isLastGaspPacket || packet.type === 'CRITICAL_LAST_GASP_5PCT' || (typeof packet.battery === 'number' && packet.battery <= 5)),
+      lastKnownLocation: packet.lastKnownLocation || (packet.isLastGaspPacket || (typeof packet.battery === 'number' && packet.battery <= 5) ? {
+        lat: latitude,
+        lng: longitude,
+        accuracy: Number(packet.accuracy) || 5,
+        altitude: Number(packet.altitude) || 15,
+        lockedAt: Date.now()
+      } : undefined),
       payload: packet.payload || {
         msg: packet.distressMessage || '🚨 SOS: Citizen in distress! Immediate extraction required.',
         level: 'CRITICAL'
