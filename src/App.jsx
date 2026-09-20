@@ -315,6 +315,9 @@ export default function App() {
   // Emergency Flashlight Strobe & Piercing Acoustic Distress Beacon State
   const [isStrobeActive, setIsStrobeActive] = useState(true);
   const [isVictimAudioMuted, setIsVictimAudioMuted] = useState(false);
+  const [sirenPattern, setSirenPattern] = useState('WAIL'); // 'WAIL' | 'HILO' | 'YELP'
+  const [isManualSirenTest, setIsManualSirenTest] = useState(false);
+  const activeSirenRef = useRef(null);
   const [hasHardwareTorch, setHasHardwareTorch] = useState(false);
   const [strobeFlashState, setStrobeFlashState] = useState(false);
   const hasSent5PctPacketRef = useRef(false);
@@ -589,83 +592,266 @@ export default function App() {
   }, [isDistressActive, activeRole, isStrobeActive, addLog]);
 
   // ==========================================
-  // SHARP PIERCING ACOUSTIC LOCATOR BEACON
+  // HIGH-DECIBEL CONTINUOUS EMERGENCY ACOUSTIC SIREN ENGINE
   // ==========================================
-  useEffect(() => {
-    if (!isDistressActive || activeRole !== 'ROLE_VICTIM' || isVictimAudioMuted) {
-      return;
-    }
-
-    const triggerSharpPiercingPulse = () => {
+  // Gracefully ramps down and stops all active siren oscillators and modulators
+  const stopSiren = useCallback(() => {
+    if (activeSirenRef.current) {
+      const { oscs, lfos, masterGain, ctx, hiloTimer } = activeSirenRef.current;
+      if (hiloTimer) clearInterval(hiloTimer);
       try {
-        const ctx = getAudioContext();
-        if (ctx) {
-          if (ctx.state === 'suspended') {
-            ctx.resume().catch(() => {});
-          }
-          if (ctx.state === 'running') {
-            const now = ctx.currentTime;
-
-            // Piercing Spike 1: 2900 Hz -> 3300 Hz sawtooth bite
-            const osc1 = ctx.createOscillator();
-            const gain1 = ctx.createGain();
-            osc1.type = 'sawtooth';
-            osc1.frequency.setValueAtTime(2900, now);
-            osc1.frequency.linearRampToValueAtTime(3300, now + 0.08);
-            gain1.gain.setValueAtTime(0.35, now);
-            gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
-            osc1.connect(gain1);
-            gain1.connect(ctx.destination);
-            osc1.start(now);
-            osc1.stop(now + 0.09);
-
-            // Piercing Spike 2: 3500 Hz -> 3900 Hz high-frequency sweep
-            const osc2 = ctx.createOscillator();
-            const gain2 = ctx.createGain();
-            osc2.type = 'sawtooth';
-            osc2.frequency.setValueAtTime(3500, now + 0.11);
-            osc2.frequency.linearRampToValueAtTime(3950, now + 0.22);
-            gain2.gain.setValueAtTime(0.4, now + 0.11);
-            gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.23);
-            osc2.connect(gain2);
-            gain2.connect(ctx.destination);
-            osc2.start(now + 0.11);
-            osc2.stop(now + 0.23);
-          }
+        if (masterGain && ctx && ctx.state !== 'closed') {
+          const now = ctx.currentTime;
+          masterGain.gain.setValueAtTime(masterGain.gain.value, now);
+          masterGain.gain.linearRampToValueAtTime(0.0001, now + 0.05);
         }
+        setTimeout(() => {
+          oscs?.forEach(osc => {
+            try {
+              osc.stop();
+              osc.disconnect();
+            } catch (e) {}
+          });
+          lfos?.forEach(lfo => {
+            try {
+              lfo.stop();
+              lfo.disconnect();
+            } catch (e) {}
+          });
+        }, 60);
       } catch (e) {}
+      activeSirenRef.current = null;
+    }
+  }, []);
+
+  // Continuous High-Decibel Emergency Siren Synthesizer
+  // Solves the "only ticking" issue by synthesizing continuous, unbroken acoustic wails
+  // with multi-oscillator layering (sawtooth + square + sub-octave), dynamics compression,
+  // and 0.95 peak volume gain for maximum audibility and penetration through rubble.
+  const startLoudSiren = useCallback((mode = 'WAIL') => {
+    stopSiren();
+    try {
+      const ctx = getAudioContext();
+      if (!ctx) return;
+
+      const launchSirenNodes = () => {
+        if (ctx.state !== 'running') return;
+        const now = ctx.currentTime;
+
+        // Dynamics compressor to boost RMS volume to maximum loudness without digital clipping
+        const compressor = ctx.createDynamicsCompressor();
+        compressor.threshold.setValueAtTime(-6, now);
+        compressor.knee.setValueAtTime(4, now);
+        compressor.ratio.setValueAtTime(16, now);
+        compressor.attack.setValueAtTime(0.002, now);
+        compressor.release.setValueAtTime(0.12, now);
+
+        // Master Gain staged to 0.95 for maximum loud speaker output
+        const masterGain = ctx.createGain();
+        masterGain.gain.setValueAtTime(0.01, now);
+        masterGain.gain.linearRampToValueAtTime(0.95, now + 0.08);
+
+        compressor.connect(masterGain);
+        masterGain.connect(ctx.destination);
+
+        const oscs = [];
+        const lfos = [];
+        let hiloTimer = null;
+
+        if (mode === 'HILO') {
+          // European Civil Defense Two-Tone Horn (960Hz / 770Hz loud alternating horn)
+          const baseFreq = 865;
+          const jump = 95; // 865 + 95 = 960Hz, 865 - 95 = 770Hz
+
+          const osc1 = ctx.createOscillator();
+          osc1.type = 'sawtooth';
+          osc1.frequency.setValueAtTime(baseFreq, now);
+
+          const osc2 = ctx.createOscillator();
+          osc2.type = 'square';
+          osc2.frequency.setValueAtTime(baseFreq, now);
+
+          const lfo = ctx.createOscillator();
+          lfo.type = 'square';
+          lfo.frequency.setValueAtTime(1.2, now); // ~416ms alternating tone
+
+          const lfoGain = ctx.createGain();
+          lfoGain.gain.setValueAtTime(jump, now);
+          lfo.connect(lfoGain);
+          lfoGain.connect(osc1.frequency);
+          lfoGain.connect(osc2.frequency);
+
+          osc1.connect(compressor);
+          osc2.connect(compressor);
+
+          lfo.start(now);
+          osc1.start(now);
+          osc2.start(now);
+
+          oscs.push(osc1, osc2);
+          lfos.push(lfo);
+        } else if (mode === 'YELP') {
+          // High-Speed Tactical Yelp Screamer (850Hz to 1800Hz rapid sweep)
+          const centerFreq = 1325;
+          const depth = 475;
+
+          const osc1 = ctx.createOscillator();
+          osc1.type = 'sawtooth';
+          osc1.frequency.setValueAtTime(centerFreq, now);
+
+          const osc2 = ctx.createOscillator();
+          osc2.type = 'square';
+          osc2.frequency.setValueAtTime(centerFreq + 6, now);
+
+          const lfo = ctx.createOscillator();
+          lfo.type = 'sawtooth';
+          lfo.frequency.setValueAtTime(3.4, now); // 3.4 rapid sweeps per second
+
+          const lfoGain = ctx.createGain();
+          lfoGain.gain.setValueAtTime(depth, now);
+          lfo.connect(lfoGain);
+          lfoGain.connect(osc1.frequency);
+          lfoGain.connect(osc2.frequency);
+
+          osc1.connect(compressor);
+          osc2.connect(compressor);
+
+          lfo.start(now);
+          osc1.start(now);
+          osc2.start(now);
+
+          oscs.push(osc1, osc2);
+          lfos.push(lfo);
+        } else {
+          // WAIL (Standard Continuous High-Decibel Disaster Evacuation Siren)
+          // Continuous 670Hz to 1630Hz undulating wail with dual sawtooth/square harmonics & sub-octave rumble
+          const centerFreq = 1150;
+          const depth = 480;
+
+          const osc1 = ctx.createOscillator();
+          osc1.type = 'sawtooth';
+          osc1.frequency.setValueAtTime(centerFreq, now);
+
+          const osc2 = ctx.createOscillator();
+          osc2.type = 'square';
+          osc2.frequency.setValueAtTime(centerFreq + 5, now);
+
+          const oscSub = ctx.createOscillator();
+          oscSub.type = 'sawtooth';
+          oscSub.frequency.setValueAtTime(centerFreq / 2, now);
+          const subGain = ctx.createGain();
+          subGain.gain.setValueAtTime(0.45, now);
+          oscSub.connect(subGain);
+          subGain.connect(compressor);
+
+          const lfo = ctx.createOscillator();
+          lfo.type = 'triangle';
+          lfo.frequency.setValueAtTime(1.1, now); // ~66 wails per minute
+
+          const lfoGain = ctx.createGain();
+          lfoGain.gain.setValueAtTime(depth, now);
+          lfo.connect(lfoGain);
+          lfoGain.connect(osc1.frequency);
+          lfoGain.connect(osc2.frequency);
+
+          const subLfoGain = ctx.createGain();
+          subLfoGain.gain.setValueAtTime(depth / 2, now);
+          lfo.connect(subLfoGain);
+          subLfoGain.connect(oscSub.frequency);
+
+          osc1.connect(compressor);
+          osc2.connect(compressor);
+
+          lfo.start(now);
+          osc1.start(now);
+          osc2.start(now);
+          oscSub.start(now);
+
+          oscs.push(osc1, osc2, oscSub);
+          lfos.push(lfo);
+        }
+
+        activeSirenRef.current = {
+          oscs,
+          lfos,
+          masterGain,
+          ctx,
+          hiloTimer
+        };
+        setAudioUnlocked(true);
+      };
+
+      if (ctx.state === 'suspended') {
+        ctx.resume().then(launchSirenNodes).catch(() => {});
+      } else {
+        launchSirenNodes();
+      }
+    } catch (e) {
+      console.warn('Loud siren engine notice:', e);
+    }
+  }, [getAudioContext, stopSiren]);
+
+  // Master Siren Playback Controller
+  // Plays when Distress Beacon is active (and not muted) OR when manual test is triggered
+  const shouldPlaySiren = (activeRole === 'ROLE_VICTIM') && ((isDistressActive && !isVictimAudioMuted) || isManualSirenTest);
+
+  useEffect(() => {
+    if (shouldPlaySiren) {
+      startLoudSiren(sirenPattern);
+    } else {
+      stopSiren();
+    }
+    return () => {
+      stopSiren();
     };
+  }, [shouldPlaySiren, sirenPattern, startLoudSiren, stopSiren]);
 
-    triggerSharpPiercingPulse();
-    const sharpInterval = setInterval(triggerSharpPiercingPulse, 720);
-
-    return () => clearInterval(sharpInterval);
-  }, [isDistressActive, activeRole, isVictimAudioMuted, getAudioContext]);
-
-  // Emergency Siren Tone Trigger for High-Priority Rescuer Alert
+  // High-Decibel Emergency Siren Alert for Responders (Dual 1.3s Burst)
   const playEmergencySiren = useCallback(() => {
     try {
       const ctx = getAudioContext();
-      if (ctx) {
-        if (ctx.state === 'suspended') {
-          ctx.resume().catch(() => {});
-        }
-        if (ctx.state === 'running') {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = 'sawtooth';
-          const now = ctx.currentTime;
-          osc.frequency.setValueAtTime(650, now);
-          osc.frequency.linearRampToValueAtTime(1100, now + 0.3);
-          osc.frequency.linearRampToValueAtTime(650, now + 0.6);
-          gain.gain.setValueAtTime(0.35, now);
-          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.65);
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start(now);
-          osc.stop(now + 0.65);
-        }
+      if (!ctx) return;
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
       }
+      const now = ctx.currentTime;
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.setValueAtTime(-6, now);
+      comp.ratio.setValueAtTime(14, now);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.01, now);
+      gain.gain.linearRampToValueAtTime(0.92, now + 0.05);
+      gain.gain.setValueAtTime(0.92, now + 1.15);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 1.3);
+
+      comp.connect(gain);
+      gain.connect(ctx.destination);
+
+      // Dual sawtooth + square blast sweeping twice
+      const osc1 = ctx.createOscillator();
+      osc1.type = 'sawtooth';
+      osc1.frequency.setValueAtTime(650, now);
+      osc1.frequency.linearRampToValueAtTime(1300, now + 0.3);
+      osc1.frequency.linearRampToValueAtTime(650, now + 0.6);
+      osc1.frequency.linearRampToValueAtTime(1350, now + 0.95);
+      osc1.frequency.linearRampToValueAtTime(700, now + 1.25);
+
+      const osc2 = ctx.createOscillator();
+      osc2.type = 'square';
+      osc2.frequency.setValueAtTime(655, now);
+      osc2.frequency.linearRampToValueAtTime(1305, now + 0.3);
+      osc2.frequency.linearRampToValueAtTime(655, now + 0.6);
+      osc2.frequency.linearRampToValueAtTime(1355, now + 0.95);
+      osc2.frequency.linearRampToValueAtTime(705, now + 1.25);
+
+      osc1.connect(comp);
+      osc2.connect(comp);
+
+      osc1.start(now);
+      osc2.start(now);
+      osc1.stop(now + 1.3);
+      osc2.stop(now + 1.3);
     } catch (e) {}
   }, [getAudioContext]);
 
@@ -1561,6 +1747,7 @@ export default function App() {
   const deactivateDistressBeacon = () => {
     setIsDistressActive(false);
     setIsStrobeActive(false);
+    setIsManualSirenTest(false);
     setStrobeFlashState(false);
     // Send Safe resolution broadcast
     const packet = {
@@ -2387,8 +2574,10 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* EMERGENCY FLASHLIGHT STROBE & SHARP ACOUSTIC SIREN PANEL */}
-                  <div className="w-full bg-[#141C26] border border-[#D97706] rounded-lg p-4 text-left space-y-3">
+                  {/* EMERGENCY FLASHLIGHT STROBE & HIGH-DECIBEL CONTINUOUS SIREN PANEL */}
+                  <div className={`w-full bg-[#141C26] rounded-lg p-4 text-left space-y-3 border transition-colors ${
+                    !isVictimAudioMuted ? 'border-[#DC2626]' : 'border-[#2D3848]'
+                  }`}>
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2.5">
                         <div className={`p-2.5 rounded-lg border transition-all ${
@@ -2399,25 +2588,29 @@ export default function App() {
                           <Flashlight className="w-5 h-5" />
                         </div>
                         <div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <h3 className="text-sm font-bold text-[#F1F5F9]">
-                              Emergency Flashlight Strobe &amp; Sharp Sound Siren
+                              Flashlight Strobe &amp; High-Decibel Acoustic Siren
                             </h3>
-                            <span className="bg-[#D97706]/20 text-[#D97706] text-[10px] font-mono px-2 py-0.5 rounded border border-[#D97706]/40 font-bold">
-                              ACTIVE
+                            <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold border ${
+                              !isVictimAudioMuted
+                                ? 'bg-[#DC2626] text-white border-[#DC2626] animate-pulse'
+                                : 'bg-[#0B0F15] text-[#94A3B8] border-[#2D3848]'
+                            }`}>
+                              {!isVictimAudioMuted ? '🔊 SIREN BLASTING (MAX LOUDNESS)' : '🔇 SIREN MUTED'}
                             </span>
                           </div>
                           <p className="text-[11px] text-[#94A3B8] font-mono mt-0.5">
-                            {hasHardwareTorch
-                              ? '🔦 Hardware rear camera torch pulsing high-frequency strobe.'
-                              : '💡 Screen optical strobe active (fallback for devices without torch).'} Sharp piercing 3.5kHz locator siren broadcasting.
+                            {!isVictimAudioMuted
+                              ? `Continuous high-decibel siren (${sirenPattern === 'WAIL' ? '670Hz-1630Hz Continuous Evacuation Wail' : sirenPattern === 'HILO' ? '960Hz/770Hz European Two-Tone Horn' : '850Hz-1800Hz High-Speed Screamer Yelp'}) broadcasting at full speaker volume with dynamic compression. Zero ticking.`
+                              : 'Acoustic siren is muted to preserve battery or maintain silence.'}
                           </p>
                         </div>
                       </div>
                     </div>
 
                     {/* Strobe & Sound Toggle Controls */}
-                    <div className="grid grid-cols-2 gap-2 pt-1">
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
                       <button
                         id="btn-toggle-victim-strobe"
                         onClick={() => setIsStrobeActive(prev => !prev)}
@@ -2428,7 +2621,7 @@ export default function App() {
                         }`}
                       >
                         <Flashlight className="w-4 h-4" />
-                        <span>{isStrobeActive ? '🔦 Flashlight: STROBING' : '🔦 Flashlight: PAUSED'}</span>
+                        <span>{isStrobeActive ? '🔦 Strobe: ACTIVE' : '🔦 Strobe: PAUSED'}</span>
                       </button>
 
                       <button
@@ -2436,13 +2629,35 @@ export default function App() {
                         onClick={() => setIsVictimAudioMuted(prev => !prev)}
                         className={`px-3 py-2.5 rounded-lg text-xs font-bold font-mono transition flex items-center justify-center gap-2 border ${
                           !isVictimAudioMuted
-                            ? 'bg-[#DC2626] text-white border-[#DC2626]'
+                            ? 'bg-[#DC2626] text-white border-[#DC2626] shadow-lg shadow-[#DC2626]/40'
                             : 'bg-[#0B0F15] text-[#94A3B8] border-[#2D3848] hover:text-white'
                         }`}
                       >
                         {!isVictimAudioMuted ? <Volume2 className="w-4 h-4 animate-bounce" /> : <VolumeX className="w-4 h-4" />}
-                        <span>{!isVictimAudioMuted ? '🔊 Sharp Siren: ACTIVE' : '🔇 Siren: MUTED'}</span>
+                        <span>{!isVictimAudioMuted ? '🔊 Siren: BLASTING (LOUD)' : '🔇 Siren: MUTED'}</span>
                       </button>
+
+                      {/* Pattern Selector */}
+                      <div className="flex items-center gap-1 ml-auto bg-[#0B0F15] border border-[#2D3848] rounded-lg p-1">
+                        <span className="text-[10px] text-[#94A3B8] font-mono px-1.5 hidden sm:inline">Tone:</span>
+                        {[
+                          { id: 'WAIL', label: 'Wail' },
+                          { id: 'HILO', label: 'Hi-Lo' },
+                          { id: 'YELP', label: 'Yelp' }
+                        ].map(p => (
+                          <button
+                            key={p.id}
+                            onClick={() => setSirenPattern(p.id)}
+                            className={`px-2 py-1 rounded text-[10px] font-mono font-bold transition ${
+                              sirenPattern === p.id
+                                ? 'bg-[#DC2626] text-white'
+                                : 'text-[#94A3B8] hover:text-white'
+                            }`}
+                          >
+                            {p.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
 
@@ -2718,6 +2933,53 @@ export default function App() {
                     {isListeningVoice ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
                     <span>{isListeningVoice ? 'LISTENING...' : 'ACTIVATE MIC'}</span>
                   </button>
+                </div>
+
+                {/* EMERGENCY HIGH-DECIBEL SIREN PRE-DEPLOYMENT TEST */}
+                <div className={`w-full bg-[#141C26] rounded-lg p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border transition-colors ${
+                  isManualSirenTest ? 'border-[#DC2626] shadow-lg shadow-[#DC2626]/20' : 'border-[#2D3848]'
+                }`}>
+                  <div className="text-left">
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-xs font-bold text-[#F1F5F9] flex items-center gap-1.5">
+                        <Volume2 className={`w-4 h-4 ${isManualSirenTest ? 'text-[#DC2626] animate-bounce' : 'text-[#DC2626]'}`} />
+                        <span>High-Decibel Siren Acoustic Test</span>
+                      </h4>
+                      <span className="bg-[#DC2626]/20 text-[#DC2626] border border-[#DC2626]/40 text-[9px] font-mono px-1.5 py-0.5 rounded font-bold">
+                        MAX VOLUME
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-[#94A3B8] font-mono mt-0.5">
+                      {isManualSirenTest
+                        ? '🚨 Siren is actively blasting at full power. Zero ticking clicks. Click STOP to silence.'
+                        : 'Pre-test continuous acoustic wail (670Hz-1630Hz) before entering disaster zone.'}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 w-full sm:w-auto">
+                    <select
+                      value={sirenPattern}
+                      onChange={e => setSirenPattern(e.target.value)}
+                      className="bg-[#0B0F15] border border-[#2D3848] text-[#F1F5F9] text-xs rounded px-2.5 py-2 font-mono focus:outline-none focus:border-[#DC2626]"
+                    >
+                      <option value="WAIL">🚨 Wail (Evacuation)</option>
+                      <option value="HILO">📢 Hi-Lo (Two-Tone)</option>
+                      <option value="YELP">⚡ Yelp (Rapid)</option>
+                    </select>
+
+                    <button
+                      id="btn-test-loud-siren"
+                      onClick={() => setIsManualSirenTest(prev => !prev)}
+                      className={`px-3 py-2 rounded-lg text-xs font-bold font-mono transition flex items-center justify-center gap-1.5 shrink-0 ${
+                        isManualSirenTest
+                          ? 'bg-[#DC2626] text-white animate-pulse shadow-md shadow-[#DC2626]/50 ring-2 ring-white'
+                          : 'bg-[#0B0F15] text-[#F1F5F9] border border-[#2D3848] hover:border-[#DC2626]'
+                      }`}
+                    >
+                      {isManualSirenTest ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4 text-[#DC2626]" />}
+                      <span>{isManualSirenTest ? 'STOP SIREN TEST' : '🔊 TEST LOUD SIREN'}</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
